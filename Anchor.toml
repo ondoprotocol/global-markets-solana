@@ -1,0 +1,39 @@
+[toolchain]
+package_manager = "yarn"
+anchor_version = "0.32.1"
+
+[features]
+resolution = true
+skip-lint = false
+
+[workspace]
+members = [
+    "programs/*",
+]
+
+[programs.mainnet]
+ondo_gm = "XzTT4XB8m7sLD2xi6snefSasaswsKCxx5Tifjondogm"
+
+[programs.testnet]
+ondo_gm = "xoVUinQWoi4Bxre6oqEJHp9WrJaHacs74gtYtondogm"
+
+[programs.devnet]
+ondo_gm = "sSV6QQi2UTvjmPx4UMLDFJas9CQE3VmBz64wPJHN1gm"
+
+[programs.localnet]
+ondo_gm = "9ZtajufGgF66yPKmQSq4gCUavfCJjGUBeeQV5hAkNtS1"
+
+[registry]
+url = "https://api.apr.dev"
+
+[provider]
+cluster = "localnet"
+wallet = "keys/wallets/local-dev.json"
+
+[provider.devnet]
+cluster = "devnet"
+wallet = "keys/wallets/devnet.json"
+
+[provider.testnet]
+cluster = "mainnet"
+wallet = "keys/wallets/staging.json"
