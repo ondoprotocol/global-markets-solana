@@ -28,7 +28,7 @@ solana-sdk-ids = "2.2.1"
 solana-keccak-hasher = "2.2.1"
 
 pyth-solana-receiver-sdk ="0.6.1"
-solana-security-txt = "1.1.2"
+solana-security-txt = "1.1.1"
 
 [dev-dependencies]
 proptest = "1.4"
