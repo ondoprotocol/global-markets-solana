@@ -71,9 +71,9 @@ pub enum OndoError {
     #[msg("The provided USDC price oracle is not implemented")]
     USDCOracleNotImplemented,
     #[msg("Maximum timezone offset exceeded")]
-    MaximumOffsetExceeded,
+    MaximumOffsetExceeded, // DEPRECATED, kept for compat
     #[msg("Trade attempted outside market hours")]
-    OutsideMarketHours,
+    OutsideMarketHours, // DEPRECATED, kept for compat
     #[msg("Mint must have a freeze authority or have the permanent delegate extension enabled")]
     InvalidMintConfiguration,
     #[msg("Confidence threshold exceeded")]

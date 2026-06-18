@@ -6,7 +6,7 @@ use crate::{
     errors::OndoError,
     events::{
         GMTokenMintingPaused, GMTokenRedemptionPaused, RateLimitUserSet, RoleGranted, RoleRevoked,
-        SetTradingHoursOffset, TokenManagerMintingPaused, TokenManagerRedemptionPaused,
+        TokenManagerMintingPaused, TokenManagerRedemptionPaused,
     },
     state::{GMTokenManagerState, OndoUser, RoleType, Roles, TokenLimit},
 };
@@ -68,10 +68,6 @@ impl<'info> InitializeGMTokenManager<'info> {
         trading_hours_offset: i64,
         bumps: &InitializeGMTokenManagerBumps,
     ) -> Result<()> {
-        // Validate trading hours offset
-        self.gmtoken_manager_state
-            .validate_trading_hours_offset(trading_hours_offset)?;
-
         self.gmtoken_manager_state.set_inner(GMTokenManagerState {
             execution_id: None,
             factory_paused,
@@ -88,7 +84,7 @@ impl<'info> InitializeGMTokenManager<'info> {
 
 /// Grant a GM Token Manager role to a user by initializing a `Roles` account
 /// Requires `ADMIN_ROLE_GMTOKEN_MANAGER` role
-/// Only the `PauserRoleGmtokenManager` or `IssuanceHoursRole` roles can be added
+/// Only the `PauserRoleGmtokenManager` role can be added
 #[derive(Accounts)]
 #[instruction(role: RoleType, user: Pubkey)]
 pub struct GMTokenManagerGrantRole<'info> {
@@ -129,7 +125,7 @@ pub struct GMTokenManagerGrantRole<'info> {
 impl<'info> GMTokenManagerGrantRole<'info> {
     /// Add a GM Token Manager role to a user
     /// # Arguments
-    /// * `role` - The role to grant (must be `PauserRoleGmtokenManager` or `IssuanceHoursRole`)
+    /// * `role` - The role to grant (must be `PauserRoleGmtokenManager`)
     /// * `user` - The public key of the user to grant the role to
     /// * `bumps` - The PDA bumps for account derivation
     /// # Returns
@@ -140,12 +136,9 @@ impl<'info> GMTokenManagerGrantRole<'info> {
         user: Pubkey,
         bumps: &GMTokenManagerGrantRoleBumps,
     ) -> Result<()> {
-        // Only allow PauserRoleGmtokenManager and IssuanceHoursRole roles to be created
+        // Only allow PauserRoleGmtokenManager roles to be created
         require!(
-            matches!(
-                role,
-                RoleType::PauserRoleGMTokenManager | RoleType::IssuanceHoursRole
-            ),
+            matches!(role, RoleType::PauserRoleGMTokenManager),
             OndoError::InvalidRoleType
         );
 
@@ -167,7 +160,7 @@ impl<'info> GMTokenManagerGrantRole<'info> {
 
 /// Revoke a GM Token Manager role from a user by closing their `Roles` account
 /// Requires `ADMIN_ROLE_GMTOKEN_MANAGER` role
-/// Only the `PauserRoleGmtokenManager` and `IssuanceHoursRole` roles can be removed
+/// Only the `PauserRoleGmtokenManager` role can be removed
 #[derive(Accounts)]
 pub struct GMTokenManagerRevokeRole<'info> {
     /// The account with the authority to revoke GM Token Manager roles
@@ -211,12 +204,9 @@ impl<'info> GMTokenManagerRevokeRole<'info> {
     /// # Returns
     /// * `Result<()>` - Ok if the role is successfully revoked, Err otherwise
     pub fn revoke_gmtoken_manager_role(&mut self) -> Result<()> {
-        // Only allow PauserRoleGmtokenManager or IssuanceHoursRole roles to be revoked
+        // Only allow PauserRoleGmtokenManager roles to be revoked
         require!(
-            matches!(
-                self.role_to_revoke.role,
-                RoleType::PauserRoleGMTokenManager | RoleType::IssuanceHoursRole
-            ),
+            matches!(self.role_to_revoke.role, RoleType::PauserRoleGMTokenManager),
             OndoError::InvalidRoleType
         );
 
@@ -598,80 +588,6 @@ impl<'info> GMTokenManagerAdminSetUserLimits<'info> {
         emit!(RateLimitUserSet {
             user: self.ondo_user.owner,
             limit: rate_limit,
-        });
-
-        Ok(())
-    }
-}
-
-/// Set trading hours offset for the GM token manager
-/// Requires `ADMIN_ROLE_GMTOKEN_MANAGER` or `ISSUANCE_HOURS_ROLE` role
-#[derive(Accounts)]
-pub struct GMTokenManagerAdminSetTradingHoursOffset<'info> {
-    /// The account with the authority to set the trading hours offset
-    pub authority: Signer<'info>,
-
-    /// The `Roles` account verifying the authority has the `ADMIN_ROLE_GMTOKEN_MANAGER` role
-    /// # PDA Seeds
-    /// - `ADMIN_ROLE_GMTOKEN_MANAGER` or `ISSUANCE_HOURS_ROLE`
-    /// - The authority's address
-    #[account(
-        seeds = [authority_role_account.role.seed(), authority.key().as_ref()],
-        bump = authority_role_account.bump,
-        constraint = authority_role_account.role == RoleType::AdminRoleGMTokenManager ||
-            authority_role_account.role == RoleType::IssuanceHoursRole @
-            OndoError::AddressNotFoundInRole
-    )]
-    pub authority_role_account: Account<'info, Roles>,
-
-    /// The GmTokenManagerState account to be modified
-    #[account(
-        mut,
-        seeds = [GMTOKEN_MANAGER_STATE_SEED],
-        bump = gmtoken_manager_state.bump,
-    )]
-    pub gmtoken_manager_state: Account<'info, GMTokenManagerState>,
-}
-
-impl<'info> GMTokenManagerAdminSetTradingHoursOffset<'info> {
-    /// Set the trading hours offset
-    ///
-    /// For Eastern Time with 8PM Friday -> 8PM Sunday closure (markets closed on weekends):
-    /// The offset shifts timestamps so that 8PM ET aligns with midnight (00:00), making
-    /// Saturday/Sunday (days 5-6) fall outside valid trading hours (Monday-Friday, days 0-4).
-    ///
-    /// # Arguments
-    /// * `new_trading_hours_offset` - The timezone offset in seconds from UTC
-    ///
-    /// # Returns
-    /// * `Result<()>` - Success if the offset is valid and updated
-    ///
-    /// # Eastern Time Values
-    ///
-    /// **Eastern Standard Time (EST):** `new_trading_hours_offset = -3600` seconds (UTC-1)
-    /// - EST is UTC-5 (-18000s) + 4-hour alignment (+14400s) = -3600s
-    ///
-    /// **Eastern Daylight Time (EDT):** `new_trading_hours_offset = 0` seconds (UTC+0)
-    /// - EDT is UTC-4 (-14400s) + 4-hour alignment (+14400s) = 0s
-    ///
-    /// # Daylight Savings
-    ///
-    /// This offset must be manually updated when transitioning between EST and EDT
-    /// (typically the second Sunday in March and the first Sunday in November).
-    pub fn set_trading_hours_offset(&mut self, new_trading_hours_offset: i64) -> Result<()> {
-        let prev_trading_hours_offset = self.gmtoken_manager_state.trading_hours_offset;
-
-        // Validate the new trading hours offset
-        self.gmtoken_manager_state
-            .validate_trading_hours_offset(new_trading_hours_offset)?;
-
-        // Update the trading hours offset
-        self.gmtoken_manager_state.trading_hours_offset = new_trading_hours_offset;
-
-        // Emit event for trading hours offset change
-        emit!(SetTradingHoursOffset {
-            prev_trading_hours_offset,
-            new_trading_hours_offset
         });
 
         Ok(())

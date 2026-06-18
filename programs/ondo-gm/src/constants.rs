@@ -26,8 +26,6 @@ pub const USDC_MINT: Pubkey = pubkey!("3Kyt2oSUoz3gKZNDpCptnW2URTX3ddp9nT1ytAwmU
 
 /// 24 * 60 * 60 - Number of seconds in a day
 pub const SECONDS_PER_DAY: i64 = 86400; // 24 * 60 * 60
-/// 60 * 60 - Number of seconds in an hour
-pub const SECONDS_PER_HOUR: i64 = 3600; // 60 * 60
 
 // PDA SEEDS
 
