@@ -1,0 +1,46 @@
+name: Verified Build — staging
+
+# Same pipeline as production.yml, for the staging program (testnet feature), which is ALSO
+# deployed to mainnet-beta (Anchor.toml `[provider.testnet] cluster = mainnet`) under a
+# separate staging multisig. Run on the staging branch FIRST as a full rehearsal before
+# promoting to main.
+#
+# Required repo secrets (staging values):
+#   STAGING_RPC, STAGING_DEPLOYER_KEYPAIR, STAGING_MULTISIG, STAGING_VAULT
+
+on:
+  push:
+    branches: [staging]
+  workflow_dispatch:
+    inputs:
+      priority_fee:
+        description: "Priority fee (micro-lamports)"
+        required: true
+        default: "300000"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build-deploy-verify:
+    uses: ./.github/workflows/build-deploy-verify.yaml
+    with:
+      program: "ondo_gm"
+      program-id: "xoVUinQWoi4Bxre6oqEJHp9WrJaHacs74gtYtondogm"
+      network: "mainnet"
+      deploy: true
+      upload_idl: true
+      verify: true
+      use-squads: true
+      features: "testnet --no-default-features"
+      build-args: "--no-default-features --features testnet"
+      override-solana-version: "2.3.0"
+      override-anchor-version: "0.32.1"
+      priority-fee: ${{ github.event.inputs.priority_fee || '300000' }}
+    secrets:
+      MAINNET_SOLANA_DEPLOY_URL: ${{ secrets.STAGING_RPC }}
+      MAINNET_DEPLOYER_KEYPAIR: ${{ secrets.STAGING_DEPLOYER_KEYPAIR }}
+      MAINNET_MULTISIG: ${{ secrets.STAGING_MULTISIG }}
+      MAINNET_MULTISIG_VAULT: ${{ secrets.STAGING_VAULT }}
+      PROGRAM_ADDRESS_KEYPAIR: ${{ secrets.STAGING_PROGRAM_ADDRESS_KEYPAIR }}
