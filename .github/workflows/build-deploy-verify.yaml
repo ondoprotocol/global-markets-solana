@@ -52,13 +52,6 @@ on:
         required: false
         type: string
         default: "0"
-      use-program-metadata-idl:
-        description:
-          "Use program-metadata program for IDL upload instead of Anchor IDL
-          commands"
-        required: false
-        type: boolean
-        default: true
       features:
         description: "Cargo features for the Anchor IDL build (build-anchor)"
         type: string
@@ -68,22 +61,19 @@ on:
       # after `--` to BOTH `solana-verify build` and `solana-verify export-pda-tx`, so the
       # deployed .so and the verify PDA record identical feature flags.
       build-args:
-        description:
-          "Cargo args appended after `--` to solana-verify build and export-pda-tx
+        description: "Cargo args appended after `--` to solana-verify build and export-pda-tx
           (e.g. '--no-default-features --features mainnet')."
         type: string
         required: false
         default: ""
       override-solana-version:
-        description:
-          "The version is taken from the cargo.lock but you can also override
+        description: "The version is taken from the cargo.lock but you can also override
           it here"
         type: string
         required: false
         default: ""
       override-anchor-version:
-        description:
-          "The version is taken from the cargo.lock but you can also override
+        description: "The version is taken from the cargo.lock but you can also override
           it here"
         type: string
         required: false
@@ -109,9 +99,6 @@ on:
       idl_buffer:
         description: "IDL buffer address"
         value: ${{ jobs.build.outputs.idl_buffer }}
-      metadata_buffer:
-        description: "Program-metadata buffer address"
-        value: ${{ jobs.build.outputs.metadata_buffer }}
 
 jobs:
   build:
@@ -122,7 +109,6 @@ jobs:
     outputs:
       buffer: ${{ steps.program-buffer.outputs.buffer }}
       idl_buffer: ${{ steps.idl-buffer.outputs.buffer }}
-      metadata_buffer: ${{ steps.metadata-buffer.outputs.buffer }}
       is_anchor: ${{ steps.check-anchor.outputs.is_anchor }}
     steps:
       - name: Checkout repository
@@ -323,8 +309,7 @@ jobs:
             ./target/deploy/${{ env.PROGRAM_NAME }}.so
 
       - name: Store idl files
-        if:
-          ${{ !env.ACT && hashFiles(format('./target/idl/{0}.json', env.PROGRAM_NAME))
+        if: ${{ !env.ACT && hashFiles(format('./target/idl/{0}.json', env.PROGRAM_NAME))
           != '' }}
         uses: actions/upload-artifact@v4
         with:
@@ -349,15 +334,52 @@ jobs:
           program: ${{ env.PROGRAM_NAME }}
           rpc-url: ${{ env.DEPLOY_URL }}
           keypair: ${{ env.DEPLOYER_KEYPAIR }}
-          buffer-authority-address:
-            ${{ inputs.use-squads == true && env.MULTISIG_VAULT ||
+          buffer-authority-address: ${{ inputs.use-squads == true && env.MULTISIG_VAULT ||
             env.DEPLOYER_ADDRESS }}
           priority-fee: ${{ inputs.priority-fee }}
+
+      # VENDORED: the programdata account is allocated with ZERO headroom (account size ==
+      # 45-byte header + current program length). A Squads `Upgrade` to a larger program
+      # must grow programdata, but a single vault tx can only grow an account by
+      # MAX_PERMITTED_DATA_INCREASE (10240 bytes) total across its CPIs. So if the new
+      # program is larger, extend the programdata account FIRST in a direct, deployer-signed
+      # tx (permissionless, not subject to the CPI cap) before the multisig upgrade runs.
+      # The non-squads path upgrades directly, where the loader handles growth itself.
+      - name: Extend programdata if new program is larger (Squads)
+        if: inputs.deploy && inputs.use-squads
+        run: |
+          set -euo pipefail
+          echo "${{ env.DEPLOYER_KEYPAIR }}" > ./deploy-keypair.json
+          chmod 600 ./deploy-keypair.json
+
+          acct_space() {
+            solana account "$1" --url "${{ env.DEPLOY_URL }}" --output json \
+              | python3 -c "import json,sys; print(json.load(sys.stdin)['account']['space'])"
+          }
+
+          # Buffer account = 37-byte UpgradeableLoaderState::Buffer header + program bytes.
+          NEW_PROG_LEN=$(( $(acct_space "${{ steps.program-buffer.outputs.buffer }}") - 37 ))
+          # ProgramData account = 45-byte header + program capacity.
+          PDA=$(solana program show "${{ env.PROGRAM_ID }}" --url "${{ env.DEPLOY_URL }}" \
+            | awk '/ProgramData Address:/ {print $3}')
+          CAPACITY=$(( $(acct_space "$PDA") - 45 ))
+
+          echo "New program length:       $NEW_PROG_LEN bytes"
+          echo "Current programdata cap.: $CAPACITY bytes"
+          if [ "$NEW_PROG_LEN" -gt "$CAPACITY" ]; then
+            DELTA=$(( NEW_PROG_LEN - CAPACITY ))
+            echo "Extending programdata by $DELTA bytes (deployer-signed, off-multisig)…"
+            solana program extend "${{ env.PROGRAM_ID }}" "$DELTA" \
+              --url "${{ env.DEPLOY_URL }}" --keypair ./deploy-keypair.json
+          else
+            echo "No extend needed (new program fits the current programdata allocation)."
+          fi
+          rm -f ./deploy-keypair.json
 
       - name: Write IDL Buffer (Anchor)
         uses: solana-foundation/github-actions/write-idl-buffer@v0.2.11
         id: idl-buffer
-        if: inputs.upload_idl && !inputs.use-program-metadata-idl
+        if: inputs.upload_idl
         with:
           program-id: ${{ env.PROGRAM_ID }}
           program: ${{ env.PROGRAM_NAME }}
@@ -365,17 +387,6 @@ jobs:
           keypair: ${{ env.DEPLOYER_KEYPAIR }}
           idl-authority: ${{ inputs.use-squads && env.MULTISIG_VAULT ||
             env.DEPLOYER_ADDRESS }}
-
-      - name: Write Metadata Buffer (Program Metadata)
-        uses: solana-foundation/github-actions/write-metadata-buffer@v0.2.11
-        id: metadata-buffer
-        if: inputs.upload_idl && inputs.use-program-metadata-idl && inputs.use-squads
-        with:
-          idl-path: ./target/idl/${{ env.PROGRAM_NAME }}.json
-          rpc-url: ${{ env.DEPLOY_URL }}
-          keypair: ${{ env.DEPLOYER_KEYPAIR }}
-          buffer-authority: ${{ env.MULTISIG_VAULT }}
-          priority-fees: ${{ inputs.priority-fee }}
 
       - name: Program Upgrade
         uses: solana-foundation/github-actions/program-upgrade@v0.2.11
@@ -390,40 +401,12 @@ jobs:
 
       - name: IDL Upload (Anchor)
         uses: solana-foundation/github-actions/idl-upload@v0.2.11
-        if:
-          inputs.upload_idl && !inputs.use-program-metadata-idl && inputs.use-squads
-          == false
+        if: inputs.upload_idl && inputs.use-squads == false
         with:
           program-id: ${{ env.PROGRAM_ID }}
           rpc-url: ${{ env.DEPLOY_URL }}
           keypair: ${{ env.DEPLOYER_KEYPAIR }}
           idl-buffer: ${{ steps.idl-buffer.outputs.buffer }}
-
-      - name: Metadata Upload (Program Metadata - direct)
-        uses: solana-foundation/github-actions/metadata-upload@v0.2.11
-        if:
-          inputs.upload_idl && inputs.use-program-metadata-idl && inputs.use-squads ==
-          false
-        with:
-          program-id: ${{ env.PROGRAM_ID }}
-          idl-path: ./target/idl/${{ env.PROGRAM_NAME }}.json
-          seed: idl
-          rpc-url: ${{ env.DEPLOY_URL }}
-          keypair: ${{ env.DEPLOYER_KEYPAIR }}
-          priority-fees: ${{ inputs.priority-fee }}
-
-      - name: Metadata Upload (Program Metadata - Squads buffer)
-        uses: solana-foundation/github-actions/metadata-upload@v0.2.11
-        if: inputs.upload_idl && inputs.use-program-metadata-idl && inputs.use-squads
-        with:
-          program-id: ${{ env.PROGRAM_ID }}
-          buffer: ${{ steps.metadata-buffer.outputs.buffer }}
-          seed: idl
-          rpc-url: ${{ env.DEPLOY_URL }}
-          keypair: ${{ env.DEPLOYER_KEYPAIR }}
-          priority-fees: ${{ inputs.priority-fee }}
-          export: ${{ env.MULTISIG_VAULT }}
-          close-buffer: "true"
 
       - name: Wait for program buffer to finalize
         if: inputs.use-squads == false
@@ -465,19 +448,15 @@ jobs:
             echo "Verify PDA written. Run 'solana-verify remote submit-job --program-id ${{ env.PROGRAM_ID }} --uploader <deployer>' to queue the remote build."
           fi
 
-      - name:
-          Create squads program upgrade transaction (set Idl buffer, verify pda, set
-          program buffer)
+      - name: Create squads program upgrade transaction (verify pda, set program buffer)
         if: inputs.deploy && inputs.use-squads
         uses: solana-foundation/squads-program-action@v0.4.3
         with:
           rpc: ${{ env.DEPLOY_URL }}
           program: ${{ env.PROGRAM_ID }}
           buffer: ${{ steps.program-buffer.outputs.buffer }}
-          idl-buffer: ${{ !inputs.use-program-metadata-idl &&
-            steps.idl-buffer.outputs.buffer || '' }}
-          metadata-buffer: ${{ inputs.use-program-metadata-idl &&
-            steps.metadata-buffer.outputs.buffer || '' }}
+          # VENDORED: IDL ships as the Anchor IDL buffer (SetBuffer), bundled into this proposal.
+          idl-buffer: ${{ steps.idl-buffer.outputs.buffer }}
           multisig: ${{ env.MULTISIG }}
           keypair: ${{ env.DEPLOYER_KEYPAIR }}
           priority-fee: ${{ inputs.priority-fee }}
