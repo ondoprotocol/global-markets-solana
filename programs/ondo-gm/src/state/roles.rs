@@ -34,7 +34,7 @@ pub enum RoleType {
     PauserRoleGMToken,
     UnpauserRoleGMToken,
     AdminRoleGMTokenManager,
-    IssuanceHoursRole,
+    IssuanceHoursRole, // DEPRECATED, kept for compat
     SetterRoleOndoSanityCheck,
     ConfigurerRoleOndoSanityCheck,
     AdminRoleOndoSanityCheck,
@@ -58,7 +58,7 @@ impl RoleType {
     pub const UNPAUSER_ROLE_GMTOKEN: &[u8] = b"UnpauserRoleGMToken";
     pub const PAUSER_ROLE_GMTOKEN_MANAGER: &[u8] = b"PauserRoleGMTokenManager";
     pub const ADMIN_ROLE_GMTOKEN_MANAGER: &[u8] = b"AdminRoleGMTokenManager";
-    pub const ISSUANCE_HOURS_ROLE: &[u8] = b"IssuanceHoursRole";
+    pub const ISSUANCE_HOURS_ROLE: &[u8] = b"IssuanceHoursRole"; // DEPRECATED, kept for compat
     pub const SETTER_ROLE_ONDO_SANITY_CHECK: &[u8] = b"SetterRoleOndoSanityCheck";
     pub const CONFIGURER_ROLE_ONDO_SANITY_CHECK: &[u8] = b"ConfigurerRoleOndoSanityCheck";
     pub const ADMIN_ROLE_ONDO_SANITY_CHECK: &[u8] = b"AdminRoleOndoSanityCheck";
@@ -83,7 +83,7 @@ impl RoleType {
             RoleType::PauserRoleGMToken => Self::PAUSER_ROLE_GMTOKEN,
             RoleType::UnpauserRoleGMToken => Self::UNPAUSER_ROLE_GMTOKEN,
             RoleType::AdminRoleGMTokenManager => Self::ADMIN_ROLE_GMTOKEN_MANAGER,
-            RoleType::IssuanceHoursRole => Self::ISSUANCE_HOURS_ROLE,
+            RoleType::IssuanceHoursRole => Self::ISSUANCE_HOURS_ROLE, // DEPRECATED, kept for compat
             RoleType::SetterRoleOndoSanityCheck => Self::SETTER_ROLE_ONDO_SANITY_CHECK,
             RoleType::ConfigurerRoleOndoSanityCheck => Self::CONFIGURER_ROLE_ONDO_SANITY_CHECK,
             RoleType::AdminRoleOndoSanityCheck => Self::ADMIN_ROLE_ONDO_SANITY_CHECK,

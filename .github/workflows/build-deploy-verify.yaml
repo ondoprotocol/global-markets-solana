@@ -1,0 +1,466 @@
+name: Build + Deploy + Verify (vendored)
+
+# Vendored copy of solana-foundation/github-workflows reusable-build.yaml@v0.4.1, with ONE
+# substantive change: the verify step is feature-aware. Upstream's verify-build action runs
+# `solana-verify export-pda-tx` WITHOUT cargo feature flags, so a feature-flagged program
+# (different declare_id per feature) can never verify. Here the verify step runs
+# `export-pda-tx … -- <build-args>` inline, and the existing squads-program-action bundles
+# its output into the upgrade proposal as before.
+#
+# Maintenance note: this is a fork. Re-diff against upstream periodically for fixes /
+# new Solana image versions. Changes from upstream are marked "VENDORED:".
+
+on:
+  workflow_call:
+    inputs:
+      program:
+        description: "Program to build"
+        required: true
+        type: string
+      network:
+        description: "Target network for deployment (devnet/mainnet)"
+        required: false
+        default: "devnet"
+        type: string
+      deploy:
+        description: "Deploy program after build"
+        required: false
+        type: boolean
+        default: false
+      upload_idl:
+        description: "Upload IDL after build"
+        required: false
+        type: boolean
+        default: true
+      verify:
+        description: "Verify build on-chain using solana-verify"
+        required: false
+        type: boolean
+        default: true
+      use-squads:
+        description: "Use Squads multisig for deployment"
+        required: false
+        type: boolean
+        default: false
+      priority-fee:
+        description: "Priority fee in microlamports for transactions"
+        required: false
+        type: string
+        default: "100000"
+      vault-index:
+        description: "Index of the vault to use for the multisig"
+        required: false
+        type: string
+        default: "0"
+      features:
+        description: "Cargo features for the Anchor IDL build (build-anchor)"
+        type: string
+        required: false
+        default: ""
+      # VENDORED: single source of truth for the verifiable build's cargo args. Passed verbatim
+      # after `--` to BOTH `solana-verify build` and `solana-verify export-pda-tx`, so the
+      # deployed .so and the verify PDA record identical feature flags.
+      build-args:
+        description: "Cargo args appended after `--` to solana-verify build and export-pda-tx
+          (e.g. '--no-default-features --features mainnet')."
+        type: string
+        required: false
+        default: ""
+      override-solana-version:
+        description: "The version is taken from the cargo.lock but you can also override
+          it here"
+        type: string
+        required: false
+        default: ""
+      override-anchor-version:
+        description: "The version is taken from the cargo.lock but you can also override
+          it here"
+        type: string
+        required: false
+        default: ""
+      program-id:
+        description: "The program ID to use for deployment and verification"
+        type: string
+        required: true
+    secrets:
+      DEVNET_SOLANA_DEPLOY_URL:
+      MAINNET_SOLANA_DEPLOY_URL:
+      DEVNET_DEPLOYER_KEYPAIR:
+      MAINNET_DEPLOYER_KEYPAIR:
+      PROGRAM_ADDRESS_KEYPAIR:
+      DEVNET_MULTISIG:
+      DEVNET_MULTISIG_VAULT:
+      MAINNET_MULTISIG:
+      MAINNET_MULTISIG_VAULT:
+    outputs:
+      buffer:
+        description: "Program buffer address"
+        value: ${{ jobs.build.outputs.buffer }}
+      idl_buffer:
+        description: "IDL buffer address"
+        value: ${{ jobs.build.outputs.idl_buffer }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      SOLANA_VERIFY_VERSION: "0.5.0"
+    outputs:
+      buffer: ${{ steps.program-buffer.outputs.buffer }}
+      idl_buffer: ${{ steps.idl-buffer.outputs.buffer }}
+      is_anchor: ${{ steps.check-anchor.outputs.is_anchor }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set Program ID from input
+        run: |
+          echo "PROGRAM_ID=${{ inputs.program-id }}" >> $GITHUB_ENV
+
+      - name: Normalize Program Name
+        run: |
+          NORMALIZED_NAME=$(echo "${{ inputs.program }}" | tr '-' '_')
+          echo "PROGRAM_NAME=$NORMALIZED_NAME" >> $GITHUB_ENV
+
+      - name: Check for Anchor.toml
+        id: check-anchor
+        run: |
+          if [ -f "Anchor.toml" ]; then
+            echo "is_anchor=true" >> $GITHUB_OUTPUT
+            echo "Anchor.toml found - this is an Anchor project"
+          else
+            echo "is_anchor=false" >> $GITHUB_OUTPUT
+            echo "No Anchor.toml found - this is not an Anchor project"
+          fi
+
+      - name: Validate network
+        if: inputs.network != 'devnet' && inputs.network != 'mainnet'
+        run: |
+          echo "Error: network must be either 'devnet' or 'mainnet'"
+          exit 1
+
+      - name: Set deployment variables
+        run: |
+          if [ "${{ inputs.network }}" = "mainnet" ]; then
+            echo "IS_MAINNET=true" >> $GITHUB_ENV
+          else
+            echo "IS_MAINNET=false" >> $GITHUB_ENV
+          fi
+
+          if [ "${{ inputs.network }}" = "mainnet" ]; then
+            echo "DEPLOY_URL=${{ secrets.MAINNET_SOLANA_DEPLOY_URL }}" >> $GITHUB_ENV
+            echo "DEPLOYER_KEYPAIR=${{ secrets.MAINNET_DEPLOYER_KEYPAIR }}" >> $GITHUB_ENV
+            echo "MULTISIG=${{ secrets.MAINNET_MULTISIG }}" >> $GITHUB_ENV
+            echo "MULTISIG_VAULT=${{ secrets.MAINNET_MULTISIG_VAULT }}" >> $GITHUB_ENV
+          else
+            echo "DEPLOY_URL=${{ secrets.DEVNET_SOLANA_DEPLOY_URL }}" >> $GITHUB_ENV
+            echo "DEPLOYER_KEYPAIR=${{ secrets.DEVNET_DEPLOYER_KEYPAIR }}" >> $GITHUB_ENV
+            echo "MULTISIG=${{ secrets.DEVNET_MULTISIG }}" >> $GITHUB_ENV
+            echo "MULTISIG_VAULT=${{ secrets.DEVNET_MULTISIG_VAULT }}" >> $GITHUB_ENV
+          fi
+
+      - uses: solana-foundation/github-actions/extract-versions@f0ddc2234ac4ac19c5c17f520b60bc2d7308744f # v0.2.11
+        if: inputs.override-solana-version == '' || inputs.override-anchor-version == ''
+        id: versions
+
+      - uses: solana-foundation/github-actions/setup-all@f0ddc2234ac4ac19c5c17f520b60bc2d7308744f # v0.2.11
+        id: setup
+        with:
+          solana_version: ${{ inputs.override-solana-version != '' &&
+            inputs.override-solana-version ||
+            steps.versions.outputs.solana_version }}
+          anchor_version: ${{ inputs.override-anchor-version != '' &&
+            inputs.override-anchor-version ||
+            steps.versions.outputs.anchor_version }}
+          verify_version: ${{ env.SOLANA_VERIFY_VERSION }}
+
+      - name: Extract Addresses from Keypairs
+        run: |
+          echo "Using network: ${{ inputs.network }}"
+
+          if [ "${{ inputs.network }}" = "mainnet" ]; then
+            if [ -z "${{ secrets.MAINNET_DEPLOYER_KEYPAIR }}" ]; then
+              echo "Error: MAINNET_DEPLOYER_KEYPAIR is required"
+              exit 1
+            fi
+            echo "${{ secrets.MAINNET_DEPLOYER_KEYPAIR }}" > deployer-keypair.json
+            DEPLOYER_ADDRESS=$(solana-keygen pubkey deployer-keypair.json)
+            echo "Extracted mainnet deployer address: $DEPLOYER_ADDRESS"
+            echo "DEPLOYER_ADDRESS=$DEPLOYER_ADDRESS" >> $GITHUB_ENV
+            rm deployer-keypair.json
+          else
+            if [ -z "${{ secrets.DEVNET_DEPLOYER_KEYPAIR }}" ]; then
+              echo "Error: DEVNET_DEPLOYER_KEYPAIR is required"
+              exit 1
+            fi
+            echo "${{ secrets.DEVNET_DEPLOYER_KEYPAIR }}" > deployer-keypair.json
+            DEPLOYER_ADDRESS=$(solana-keygen pubkey deployer-keypair.json)
+            echo "Extracted devnet deployer address: $DEPLOYER_ADDRESS"
+            echo "DEPLOYER_ADDRESS=$DEPLOYER_ADDRESS" >> $GITHUB_ENV
+            rm deployer-keypair.json
+          fi
+
+          if [ -z "$DEPLOYER_ADDRESS" ]; then
+            echo "Error: Failed to extract deployer address"
+            exit 1
+          fi
+          echo "Final DEPLOYER_ADDRESS from env: $DEPLOYER_ADDRESS"
+
+      - name: Check if Program ID from keypair matches inputs.program-id
+        run: |
+          if [ -z "${{ secrets.PROGRAM_ADDRESS_KEYPAIR }}" ]; then
+              echo "🔁 PROGRAM_ADDRESS_KEYPAIR secret not set — skipping check."
+              exit 0
+          fi
+
+          echo "${{ secrets.PROGRAM_ADDRESS_KEYPAIR }}" > program-address-keypair.json
+
+          echo -n "Expected Program ID from keypair: "
+          solana-keygen pubkey program-address-keypair.json
+
+          echo "Provided program-id input: ${{ inputs.program-id }}"
+
+          if [ "$(solana-keygen pubkey program-address-keypair.json)" != "${{ inputs.program-id }}" ]; then
+              echo "❌ Program ID is not the same is the one from PROGRAM_ADDRESS_KEYPAIR secret! Either remove the secret or change the program-id input to match the keypair."
+              rm program-address-keypair.json
+              exit 1
+          fi
+
+          echo "✅ Program ID matches the provided input."
+
+          rm program-address-keypair.json
+
+      - name: Debug Initial Structure
+        run: |
+          echo "Current directory structure:"
+          pwd
+          ls -la
+
+          if [ -d "programs" ]; then
+            echo "Programs directory:"
+            ls -la programs/
+          else
+            echo "No programs directory found (looking for program in src/)"
+            ls -la src/ || echo "No src directory found"
+          fi
+
+          if [ -f "Anchor.toml" ]; then
+            echo "Anchor.toml contents:"
+            cat Anchor.toml
+          else
+            echo "No Anchor.toml found (this is expected for native programs)"
+          fi
+
+      - name: Build Anchor
+        uses: solana-foundation/github-actions/build-anchor@f0ddc2234ac4ac19c5c17f520b60bc2d7308744f # v0.2.11
+        if: steps.check-anchor.outputs.is_anchor == 'true'
+        with:
+          program: ${{ env.PROGRAM_NAME }}
+          features: ${{ inputs.features }}
+
+      # VENDORED: was `uses: build-verified@v0.2.11` (which hardcodes `-- --features <x>` and
+      # cannot pass --no-default-features). Inlined so `build-args` is the verbatim cargo tail.
+      - name: Build Verified
+        id: build-verified
+        run: |
+          sudo chmod 666 /var/run/docker.sock || true
+          ~/.cargo/bin/solana-verify build --library-name ${{ env.PROGRAM_NAME }} -- ${{ inputs.build-args }}
+
+      - name: Create local artifacts directory
+        run: |
+          mkdir -p build-artifacts/so
+          mkdir -p build-artifacts/idl
+
+          echo "Checking source files:"
+          ls -la ./target/deploy/
+
+          cp -v ./target/deploy/${{ env.PROGRAM_NAME }}.so build-artifacts/so/
+
+          if [ -f "./target/idl/${{ env.PROGRAM_NAME }}.json" ]; then
+            echo "Found IDL file:"
+            ls -la ./target/idl/
+            cp -v ./target/idl/${{ env.PROGRAM_NAME }}.json build-artifacts/idl/
+            echo "IDL file copied to: ./build-artifacts/idl/${{ env.PROGRAM_NAME }}.json"
+          else
+            echo "No IDL file found (this is expected for native programs)"
+          fi
+
+          echo "Checking copied files:"
+          ls -la build-artifacts/so/
+          if [ -f 'build-artifacts/idl/${{ env.PROGRAM_NAME }}.json' ]; then
+              ls -la build-artifacts/idl/
+          fi
+
+          chmod -R 777 build-artifacts/
+
+          echo "Artifacts copied to project directory at:"
+          echo "SO file: ./build-artifacts/so/${{ env.PROGRAM_NAME }}.so"
+          if [ -f "build-artifacts/idl/${{ env.PROGRAM_NAME }}.json" ]; then
+            echo "IDL file: ./build-artifacts/idl/${{ env.PROGRAM_NAME }}.json"
+          fi
+
+      - name: Store so files
+        if: ${{ !env.ACT }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PROGRAM_NAME }}-so
+          path: |
+            ./target/deploy/${{ env.PROGRAM_NAME }}.so
+
+      - name: Store idl files
+        if: ${{ !env.ACT && hashFiles(format('./target/idl/{0}.json', env.PROGRAM_NAME))
+          != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PROGRAM_NAME }}-idl
+          path: |
+            ./target/idl/${{ env.PROGRAM_NAME }}.json
+
+      - name: Print Artifact Locations
+        run: |
+          echo "Artifacts stored locally at:"
+          echo "SO file: ./artifacts/build/${{ env.PROGRAM_NAME }}-so/target/deploy/${{ env.PROGRAM_NAME }}.so"
+          if [ -f "./target/idl/${{ env.PROGRAM_NAME }}.json" ]; then
+            echo "IDL file: ./artifacts/build/${{ env.PROGRAM_NAME }}-idl/target/idl/${{ env.PROGRAM_NAME }}.json"
+          fi
+
+      - name: Write Program Buffer
+        uses: solana-foundation/github-actions/write-program-buffer@f0ddc2234ac4ac19c5c17f520b60bc2d7308744f # v0.2.11
+        id: program-buffer
+        if: inputs.deploy
+        with:
+          program-id: ${{ env.PROGRAM_ID }}
+          program: ${{ env.PROGRAM_NAME }}
+          rpc-url: ${{ env.DEPLOY_URL }}
+          keypair: ${{ env.DEPLOYER_KEYPAIR }}
+          buffer-authority-address: ${{ inputs.use-squads == true && env.MULTISIG_VAULT ||
+            env.DEPLOYER_ADDRESS }}
+          priority-fee: ${{ inputs.priority-fee }}
+
+      # VENDORED: the programdata account is allocated with ZERO headroom (account size ==
+      # 45-byte header + current program length). A Squads `Upgrade` to a larger program
+      # must grow programdata, but a single vault tx can only grow an account by
+      # MAX_PERMITTED_DATA_INCREASE (10240 bytes) total across its CPIs. So if the new
+      # program is larger, extend the programdata account FIRST in a direct, deployer-signed
+      # tx (permissionless, not subject to the CPI cap) before the multisig upgrade runs.
+      # The non-squads path upgrades directly, where the loader handles growth itself.
+      - name: Extend programdata if new program is larger (Squads)
+        if: inputs.deploy && inputs.use-squads
+        run: |
+          set -euo pipefail
+          echo "${{ env.DEPLOYER_KEYPAIR }}" > ./deploy-keypair.json
+          chmod 600 ./deploy-keypair.json
+
+          acct_space() {
+            solana account "$1" --url "${{ env.DEPLOY_URL }}" --output json \
+              | python3 -c "import json,sys; print(json.load(sys.stdin)['account']['space'])"
+          }
+
+          # Buffer account = 37-byte UpgradeableLoaderState::Buffer header + program bytes.
+          NEW_PROG_LEN=$(( $(acct_space "${{ steps.program-buffer.outputs.buffer }}") - 37 ))
+          # ProgramData account = 45-byte header + program capacity.
+          PDA=$(solana program show "${{ env.PROGRAM_ID }}" --url "${{ env.DEPLOY_URL }}" \
+            | awk '/ProgramData Address:/ {print $3}')
+          CAPACITY=$(( $(acct_space "$PDA") - 45 ))
+
+          echo "New program length:       $NEW_PROG_LEN bytes"
+          echo "Current programdata cap.: $CAPACITY bytes"
+          if [ "$NEW_PROG_LEN" -gt "$CAPACITY" ]; then
+            DELTA=$(( NEW_PROG_LEN - CAPACITY ))
+            echo "Extending programdata by $DELTA bytes (deployer-signed, off-multisig)…"
+            solana program extend "${{ env.PROGRAM_ID }}" "$DELTA" \
+              --url "${{ env.DEPLOY_URL }}" --keypair ./deploy-keypair.json
+          else
+            echo "No extend needed (new program fits the current programdata allocation)."
+          fi
+          rm -f ./deploy-keypair.json
+
+      - name: Write IDL Buffer (Anchor)
+        uses: solana-foundation/github-actions/write-idl-buffer@f0ddc2234ac4ac19c5c17f520b60bc2d7308744f # v0.2.11
+        id: idl-buffer
+        if: inputs.upload_idl
+        with:
+          program-id: ${{ env.PROGRAM_ID }}
+          program: ${{ env.PROGRAM_NAME }}
+          rpc-url: ${{ env.DEPLOY_URL }}
+          keypair: ${{ env.DEPLOYER_KEYPAIR }}
+          idl-authority: ${{ inputs.use-squads && env.MULTISIG_VAULT ||
+            env.DEPLOYER_ADDRESS }}
+
+      - name: Program Upgrade
+        uses: solana-foundation/github-actions/program-upgrade@f0ddc2234ac4ac19c5c17f520b60bc2d7308744f # v0.2.11
+        if: inputs.deploy && inputs.use-squads == false
+        with:
+          program-id: ${{ env.PROGRAM_ID }}
+          program: ${{ env.PROGRAM_NAME }}
+          buffer: ${{ steps.program-buffer.outputs.buffer }}
+          rpc-url: ${{ env.DEPLOY_URL }}
+          keypair: ${{ env.DEPLOYER_KEYPAIR }}
+          program-keypair: ${{ secrets.PROGRAM_ADDRESS_KEYPAIR }}
+
+      - name: IDL Upload (Anchor)
+        uses: solana-foundation/github-actions/idl-upload@f0ddc2234ac4ac19c5c17f520b60bc2d7308744f # v0.2.11
+        if: inputs.upload_idl && inputs.use-squads == false
+        with:
+          program-id: ${{ env.PROGRAM_ID }}
+          rpc-url: ${{ env.DEPLOY_URL }}
+          keypair: ${{ env.DEPLOYER_KEYPAIR }}
+          idl-buffer: ${{ steps.idl-buffer.outputs.buffer }}
+
+      - name: Wait for program buffer to finalize
+        if: inputs.use-squads == false
+        run: sleep 14
+
+      # VENDORED: was `uses: verify-build@v0.2.11` (no feature flags → feature-flagged programs
+      # can never verify). Inlined so `export-pda-tx` / `verify-from-repo` carry `-- build-args`.
+      # The squads branch emits `outputs.tx`, consumed by squads-program-action's `pda-tx` below.
+      - name: Verify Build (feature-aware)
+        id: verify-build
+        if: inputs.verify
+        env:
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ "${{ inputs.use-squads }}" = "true" ]; then
+            TX=$(solana-verify export-pda-tx "$REPO_URL" \
+              --program-id ${{ env.PROGRAM_ID }} \
+              --uploader ${{ env.MULTISIG_VAULT }} \
+              --commit-hash ${{ github.sha }} \
+              --url ${{ env.DEPLOY_URL }} \
+              --library-name ${{ env.PROGRAM_NAME }} \
+              --encoding base64 \
+              -- ${{ inputs.build-args }} | tail -n1)
+            echo "tx=$TX" >> "$GITHUB_OUTPUT"
+            echo "Exported feature-aware verify-PDA tx (will be bundled into the squads upgrade)."
+          else
+            echo "${{ env.DEPLOYER_KEYPAIR }}" > ./deploy-keypair.json
+            chmod 600 ./deploy-keypair.json
+            # Writes the verify PDA directly (deployer is the authority); no deprecated --remote.
+            solana-verify verify-from-repo "$REPO_URL" \
+              --program-id ${{ env.PROGRAM_ID }} \
+              --url ${{ env.DEPLOY_URL }} \
+              --library-name ${{ env.PROGRAM_NAME }} \
+              -k ./deploy-keypair.json --skip-build --skip-prompt \
+              --commit-hash ${{ github.sha }} \
+              -- ${{ inputs.build-args }}
+            rm -f ./deploy-keypair.json
+            echo "Verify PDA written. Run 'solana-verify remote submit-job --program-id ${{ env.PROGRAM_ID }} --uploader <deployer>' to queue the remote build."
+          fi
+
+      - name: Create squads program upgrade transaction (verify pda, set program buffer)
+        if: inputs.deploy && inputs.use-squads
+        uses: solana-foundation/squads-program-action@839c079c881344c2da0365ad6a6bb07892e08e2f # v0.4.3
+        with:
+          rpc: ${{ env.DEPLOY_URL }}
+          program: ${{ env.PROGRAM_ID }}
+          buffer: ${{ steps.program-buffer.outputs.buffer }}
+          # VENDORED: IDL ships as the Anchor IDL buffer (SetBuffer), bundled into this proposal.
+          idl-buffer: ${{ steps.idl-buffer.outputs.buffer }}
+          multisig: ${{ env.MULTISIG }}
+          keypair: ${{ env.DEPLOYER_KEYPAIR }}
+          priority-fee: ${{ inputs.priority-fee }}
+          vault-index: ${{ inputs.vault-index }}
+          # VENDORED: was steps.verify-build.outputs.pda_tx (the action's output name);
+          # the inlined verify step emits `tx`.
+          pda-tx: ${{ steps.verify-build.outputs.tx }}

@@ -1,0 +1,47 @@
+name: Verified Build — production
+
+# Builds the deterministic `.so` from THIS public repo, deploys it via the prod Squads
+# multisig, and bundles the feature-aware verify-PDA upload into the same upgrade proposal.
+# Approve + execute the proposal in the Squads app, then run:
+#   solana-verify remote submit-job --program-id XzTT…ondogm --uploader <PROD_VAULT> --url <rpc>
+#
+# Required repo secrets (production values):
+#   PROD_RPC, PROD_DEPLOYER_KEYPAIR, PROD_MULTISIG, PROD_VAULT
+#   (PROD_PROGRAM_ADDRESS_KEYPAIR — only if you hold the vanity program-id keypair)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      priority_fee:
+        description: "Priority fee (micro-lamports)"
+        required: true
+        default: "300000"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build-deploy-verify:
+    uses: ./.github/workflows/build-deploy-verify.yaml
+    with:
+      program: "ondo_gm"
+      program-id: "XzTT4XB8m7sLD2xi6snefSasaswsKCxx5Tifjondogm"
+      network: "mainnet"
+      deploy: true
+      upload_idl: true
+      verify: true
+      use-squads: true
+      features: "mainnet --no-default-features"
+      build-args: "--no-default-features --features mainnet"
+      override-solana-version: "2.3.0"
+      override-anchor-version: "0.32.1"
+      priority-fee: ${{ github.event.inputs.priority_fee || '300000' }}
+    secrets:
+      MAINNET_SOLANA_DEPLOY_URL: ${{ secrets.PROD_RPC }}
+      MAINNET_DEPLOYER_KEYPAIR: ${{ secrets.PROD_DEPLOYER_KEYPAIR }}
+      MAINNET_MULTISIG: ${{ secrets.PROD_MULTISIG }}
+      MAINNET_MULTISIG_VAULT: ${{ secrets.PROD_VAULT }}
+      PROGRAM_ADDRESS_KEYPAIR: ${{ secrets.PROD_PROGRAM_ADDRESS_KEYPAIR }}

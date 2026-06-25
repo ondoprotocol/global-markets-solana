@@ -69,16 +69,6 @@ pub mod ondo_gm {
         )
     }
 
-    /// Set the trading hours offset
-    /// Signer must have the ADMIN_ROLE_GMTOKEN_MANAGER or ISSUANCE_HOURS_ROLE role
-    pub fn set_trading_hours_offset(
-        ctx: Context<GMTokenManagerAdminSetTradingHoursOffset>,
-        new_trading_hours_offset: i64,
-    ) -> Result<()> {
-        ctx.accounts
-            .set_trading_hours_offset(new_trading_hours_offset)
-    }
-
     /// Enable or disable oracle price for USDon
     /// Signer must have the ADMIN_ROLE_USDON_MANAGER role
     pub fn enable_oracle_price(ctx: Context<USDonManagerAdmin>, is_enabled: bool) -> Result<()> {

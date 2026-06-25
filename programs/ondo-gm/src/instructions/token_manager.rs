@@ -960,9 +960,6 @@ pub fn mint_with_attestation(
 
     let current_timestamp = Clock::get()?.unix_timestamp;
 
-    ctx.gmtoken_manager_state
-        .check_is_valid_hours(current_timestamp)?;
-
     // Check attestation expiration
     require!(
         current_timestamp < expiration,
@@ -1121,9 +1118,6 @@ pub fn redeem_with_attestation(
     require_gt!(price, 0);
 
     let current_timestamp = Clock::get()?.unix_timestamp;
-
-    ctx.gmtoken_manager_state
-        .check_is_valid_hours(current_timestamp)?;
 
     // Check attestation expiration
     require!(

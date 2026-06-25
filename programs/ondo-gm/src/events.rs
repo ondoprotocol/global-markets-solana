@@ -156,16 +156,6 @@ pub struct TradeExecuted {
     pub execution_id: u128,
 }
 
-/// Event emitted when the trading hours offset is set
-/// Fields:
-/// - prev_trading_hours_offset: The previous trading hours offset
-/// - new_trading_hours_offset: The new trading hours offset
-#[event]
-pub struct SetTradingHoursOffset {
-    pub prev_trading_hours_offset: i64,
-    pub new_trading_hours_offset: i64,
-}
-
 /// Event emitted when tokens are retrieved (withdrawn) from a vault by an admin
 /// Fields:
 /// - token: The public key of the token mint being withdrawn
