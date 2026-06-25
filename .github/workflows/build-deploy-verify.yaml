@@ -160,11 +160,11 @@ jobs:
             echo "MULTISIG_VAULT=${{ secrets.DEVNET_MULTISIG_VAULT }}" >> $GITHUB_ENV
           fi
 
-      - uses: solana-foundation/github-actions/extract-versions@v0.2.11
+      - uses: solana-foundation/github-actions/extract-versions@f0ddc2234ac4ac19c5c17f520b60bc2d7308744f # v0.2.11
         if: inputs.override-solana-version == '' || inputs.override-anchor-version == ''
         id: versions
 
-      - uses: solana-foundation/github-actions/setup-all@v0.2.11
+      - uses: solana-foundation/github-actions/setup-all@f0ddc2234ac4ac19c5c17f520b60bc2d7308744f # v0.2.11
         id: setup
         with:
           solana_version: ${{ inputs.override-solana-version != '' &&
@@ -253,7 +253,7 @@ jobs:
           fi
 
       - name: Build Anchor
-        uses: solana-foundation/github-actions/build-anchor@v0.2.11
+        uses: solana-foundation/github-actions/build-anchor@f0ddc2234ac4ac19c5c17f520b60bc2d7308744f # v0.2.11
         if: steps.check-anchor.outputs.is_anchor == 'true'
         with:
           program: ${{ env.PROGRAM_NAME }}
@@ -326,7 +326,7 @@ jobs:
           fi
 
       - name: Write Program Buffer
-        uses: solana-foundation/github-actions/write-program-buffer@v0.2.11
+        uses: solana-foundation/github-actions/write-program-buffer@f0ddc2234ac4ac19c5c17f520b60bc2d7308744f # v0.2.11
         id: program-buffer
         if: inputs.deploy
         with:
@@ -377,7 +377,7 @@ jobs:
           rm -f ./deploy-keypair.json
 
       - name: Write IDL Buffer (Anchor)
-        uses: solana-foundation/github-actions/write-idl-buffer@v0.2.11
+        uses: solana-foundation/github-actions/write-idl-buffer@f0ddc2234ac4ac19c5c17f520b60bc2d7308744f # v0.2.11
         id: idl-buffer
         if: inputs.upload_idl
         with:
@@ -389,7 +389,7 @@ jobs:
             env.DEPLOYER_ADDRESS }}
 
       - name: Program Upgrade
-        uses: solana-foundation/github-actions/program-upgrade@v0.2.11
+        uses: solana-foundation/github-actions/program-upgrade@f0ddc2234ac4ac19c5c17f520b60bc2d7308744f # v0.2.11
         if: inputs.deploy && inputs.use-squads == false
         with:
           program-id: ${{ env.PROGRAM_ID }}
@@ -400,7 +400,7 @@ jobs:
           program-keypair: ${{ secrets.PROGRAM_ADDRESS_KEYPAIR }}
 
       - name: IDL Upload (Anchor)
-        uses: solana-foundation/github-actions/idl-upload@v0.2.11
+        uses: solana-foundation/github-actions/idl-upload@f0ddc2234ac4ac19c5c17f520b60bc2d7308744f # v0.2.11
         if: inputs.upload_idl && inputs.use-squads == false
         with:
           program-id: ${{ env.PROGRAM_ID }}
@@ -450,7 +450,7 @@ jobs:
 
       - name: Create squads program upgrade transaction (verify pda, set program buffer)
         if: inputs.deploy && inputs.use-squads
-        uses: solana-foundation/squads-program-action@v0.4.3
+        uses: solana-foundation/squads-program-action@839c079c881344c2da0365ad6a6bb07892e08e2f # v0.4.3
         with:
           rpc: ${{ env.DEPLOY_URL }}
           program: ${{ env.PROGRAM_ID }}
