@@ -1,14 +1,28 @@
 name: Build + Deploy + Verify (vendored)
 
-# Vendored copy of solana-foundation/github-workflows reusable-build.yaml@v0.4.1, with ONE
-# substantive change: the verify step is feature-aware. Upstream's verify-build action runs
-# `solana-verify export-pda-tx` WITHOUT cargo feature flags, so a feature-flagged program
-# (different declare_id per feature) can never verify. Here the verify step runs
-# `export-pda-tx … -- <build-args>` inline, and the existing squads-program-action bundles
-# its output into the upgrade proposal as before.
+# Vendored copy of solana-foundation/github-workflows reusable-build.yaml@v0.4.1, with TWO
+# substantive changes:
+#   1. The verify step is feature-aware. Upstream's verify-build action runs
+#      `solana-verify export-pda-tx` WITHOUT cargo feature flags, so a feature-flagged program
+#      (different declare_id per feature) can never verify. Here the verify step runs
+#      `export-pda-tx … -- <build-args>` inline, and the existing squads-program-action bundles
+#      its output into the upgrade proposal as before.
+#   2. Upstream's program-metadata IDL path is dropped entirely (the use-program-metadata-idl
+#      input — default TRUE upstream — plus the write-metadata-buffer / metadata-upload steps
+#      and the metadata_buffer output). The IDL always ships via the Anchor IDL buffer here,
+#      so don't read its absence as accidental drift when re-diffing against upstream.
+#
+# Supply-chain hardening: every `solana-foundation/github-actions/*` composite action this
+# workflow used to call is now inlined below as native steps (marked "VENDORED:"), so no
+# third-party Solana action code is fetched at run time. Their transitive sub-actions
+# (taiki-e/install-action, nick-fields/retry, actions/cache) are kept as `uses:` pinned by
+# commit SHA. The one exception is `squads-program-action` (a compiled JS action): it cannot
+# be faithfully reproduced without a bespoke helper, so it stays pinned by SHA -- see the
+# "VENDORING EXCEPTION" note at that step.
 #
 # Maintenance note: this is a fork. Re-diff against upstream periodically for fixes /
-# new Solana image versions. Changes from upstream are marked "VENDORED:".
+# new Solana image versions. Changes from upstream are marked "VENDORED:". The inlined action
+# bodies were vendored verbatim from solana-foundation/github-actions@f0ddc22 (v0.2.11).
 
 on:
   workflow_call:
@@ -75,6 +89,13 @@ on:
       override-anchor-version:
         description: "The version is taken from the cargo.lock but you can also override
           it here"
+        type: string
+        required: false
+        default: ""
+      # VENDORED: mirrors the upstream setup-all action's optional node input. Left empty by
+      # default (no node install); set it to install a Node.js toolchain during setup.
+      node_version:
+        description: "Node.js version to install during setup (leave empty to skip)"
         type: string
         required: false
         default: ""
@@ -160,20 +181,278 @@ jobs:
             echo "MULTISIG_VAULT=${{ secrets.DEVNET_MULTISIG_VAULT }}" >> $GITHUB_ENV
           fi
 
-      - uses: solana-foundation/github-actions/extract-versions@f0ddc2234ac4ac19c5c17f520b60bc2d7308744f # v0.2.11
-        if: inputs.override-solana-version == '' || inputs.override-anchor-version == ''
+      # VENDORED: inlined from solana-foundation/github-actions/extract-versions@v0.2.11
+      - name: Extract Solana / Anchor versions
         id: versions
+        shell: bash
+        run: |
+          set +e  # Don't exit on error
 
-      - uses: solana-foundation/github-actions/setup-all@f0ddc2234ac4ac19c5c17f520b60bc2d7308744f # v0.2.11
-        id: setup
+          # Debug information
+          echo "=== Debug Information ==="
+          echo "Current directory: $(pwd)"
+          echo "Directory contents:"
+          ls -la
+          echo "Looking for Anchor.toml/anchor.toml..."
+          find . -iname "anchor.toml" || echo "No anchor.toml found in directory tree"
+          echo "=======================" 
+
+          # Function to extract version from anchor.toml
+          extract_from_anchor_toml() {
+            local key=$1
+            local version=""
+            # Try both uppercase and lowercase variants
+            if [ -f "Anchor.toml" ]; then
+              echo "Found Anchor.toml in current directory" >&2
+              version=$(grep -i "^${key}_version *= *\".*\"" Anchor.toml | cut -d'"' -f2 || true)
+            elif [ -f "anchor.toml" ]; then
+              echo "Found anchor.toml in current directory" >&2
+              version=$(grep -i "^${key}_version *= *\".*\"" anchor.toml | cut -d'"' -f2 || true)
+            # Then try to find it in subdirectories
+            else
+              anchor_toml=$(find . -iname "anchor.toml" -type f | head -n 1)
+              if [ -n "$anchor_toml" ]; then
+                echo "Found anchor.toml at: $anchor_toml" >&2
+                version=$(grep -i "^${key}_version *= *\".*\"" "$anchor_toml" | cut -d'"' -f2 || true)
+              fi
+            fi
+            echo "$version"
+          }
+
+          # Extract Solana version
+          if [ -n "${{ github.event.inputs.solana_version }}" ]; then
+            SOLANA_VERSION="${{ github.event.inputs.solana_version }}"
+            echo "Using override Solana version: ${SOLANA_VERSION}"
+          else
+            # First try anchor.toml
+            SOLANA_VERSION=$(extract_from_anchor_toml "solana")
+            if [ -n "${SOLANA_VERSION}" ]; then
+              echo "Detected Solana version from anchor.toml: ${SOLANA_VERSION}"
+            else
+              echo "No Solana version found in anchor.toml, checking Cargo.lock..."
+              # Fallback to Cargo.lock
+              if [ -f "Cargo.lock" ]; then
+                SOLANA_VERSION=$(grep -A 2 'name = "solana-program"' Cargo.lock | grep 'version' | head -n 1 | cut -d'"' -f2 || true)
+                if [ -n "${SOLANA_VERSION}" ]; then
+                  echo "Detected Solana version from Cargo.lock: ${SOLANA_VERSION}"
+                else
+                  echo "⚠️  No Solana version found in Cargo.lock"
+                fi
+              else
+                echo "⚠️  Cargo.lock not found"
+              fi
+            fi
+          fi
+
+          # Ensure clean version output
+          if [ -n "${SOLANA_VERSION}" ]; then
+            # Remove any newlines and ensure we only have the version
+            SOLANA_VERSION=$(echo "${SOLANA_VERSION}" | tr -d '\n' | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+' || true)
+            if [ -n "${SOLANA_VERSION}" ]; then
+              echo "solana_version=${SOLANA_VERSION}" >> $GITHUB_OUTPUT
+              echo "SOLANA_VERSION=${SOLANA_VERSION}" >> $GITHUB_ENV
+            fi
+          fi
+
+          # Extract Anchor version
+          if [ -n "${{ github.event.inputs.anchor_version }}" ]; then
+            ANCHOR_VERSION="${{ github.event.inputs.anchor_version }}"
+            echo "Using override Anchor version: ${ANCHOR_VERSION}"
+          else
+            # First try anchor.toml
+            ANCHOR_VERSION=$(extract_from_anchor_toml "anchor")
+            if [ -n "${ANCHOR_VERSION}" ]; then
+              echo "Detected Anchor version from anchor.toml: ${ANCHOR_VERSION}"
+            else
+              echo "No Anchor version found in anchor.toml, checking Cargo.lock..."
+              # Fallback to Cargo.lock
+              if [ -f "Cargo.lock" ]; then
+                if grep -q 'name = "anchor-lang"' Cargo.lock; then
+                  ANCHOR_VERSION=$(grep -A 2 'name = "anchor-lang"' Cargo.lock | grep 'version' | head -n 1 | cut -d'"' -f2 || true)
+                  echo "Detected Anchor version from Cargo.lock: ${ANCHOR_VERSION}"
+                else
+                  echo "⚠️  No Anchor version found in Cargo.lock"
+                fi
+              else
+                echo "⚠️  Cargo.lock not found"
+              fi
+            fi
+          fi
+
+          # Ensure clean version output
+          if [ -n "${ANCHOR_VERSION}" ]; then
+            # Remove any newlines and ensure we only have the version
+            ANCHOR_VERSION=$(echo "${ANCHOR_VERSION}" | tr -d '\n' | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+' || true)
+            if [ -n "${ANCHOR_VERSION}" ]; then
+              echo "anchor_version=${ANCHOR_VERSION}" >> $GITHUB_OUTPUT
+              echo "ANCHOR_VERSION=${ANCHOR_VERSION}" >> $GITHUB_ENV
+            fi
+          fi
+
+          # Debug environment variables
+          echo "=== Environment Variables Debug ==="
+          echo "Content of GITHUB_ENV file:"
+          cat $GITHUB_ENV
+          echo "=== Direct Environment Variables ==="
+          echo "SOLANA_VERSION: ${SOLANA_VERSION:-not found}"
+          echo "ANCHOR_VERSION: ${ANCHOR_VERSION:-not found}"
+          echo "==========================="
+        if: inputs.override-solana-version == '' || inputs.override-anchor-version == ''
+
+      # VENDORED: resolves the versions that were passed to setup-all via `with:`.
+      # Applies the override-or-detected precedence once so the inlined setup steps below can
+      # read them from the environment (replaces the action's `inputs.{solana,anchor}_version`).
+      - name: Resolve tool versions
+        shell: bash
+        run: |
+          echo "SETUP_SOLANA_VERSION=${{ inputs.override-solana-version != '' && inputs.override-solana-version || steps.versions.outputs.solana_version }}" >> "$GITHUB_ENV"
+          echo "SETUP_ANCHOR_VERSION=${{ inputs.override-anchor-version != '' && inputs.override-anchor-version || steps.versions.outputs.anchor_version }}" >> "$GITHUB_ENV"
+
+      # VENDORED: inlined from solana-foundation/github-actions/setup-all@v0.2.11
+      #   (transitive taiki-e/install-action + actions/cache + actions/setup-node kept as
+      #    SHA-pinned `uses:`; node install is gated on the `node_version` input, default empty)
+      - run: sudo apt-get update
+        shell: bash
+
+      - run: sudo apt-get install -y pkg-config build-essential libudev-dev
+        shell: bash
+
+      - run: git submodule update --init --recursive --depth 1
+        shell: bash
+
+      - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        if: env.SETUP_SOLANA_VERSION != ''
+        name: Cache Solana Tool Suite
+        id: cache-solana
         with:
-          solana_version: ${{ inputs.override-solana-version != '' &&
-            inputs.override-solana-version ||
-            steps.versions.outputs.solana_version }}
-          anchor_version: ${{ inputs.override-anchor-version != '' &&
-            inputs.override-anchor-version ||
-            steps.versions.outputs.anchor_version }}
-          verify_version: ${{ env.SOLANA_VERIFY_VERSION }}
+          path: |
+            ~/.cache/solana/
+            ~/.local/share/solana/
+          key: solana-${{ runner.os }}-v0001-${{ env.SETUP_SOLANA_VERSION }}
+
+      - name: Debug Solana Version Values
+        if: env.SETUP_SOLANA_VERSION != ''
+        shell: bash
+        run: |
+          echo "=== Debug Solana Version Information ==="
+          VERSION="${{ env.SETUP_SOLANA_VERSION }}"
+          echo "Using Solana version: $VERSION"
+          echo "Cache key being used: solana-${{ runner.os }}-v0001-${{ env.SETUP_SOLANA_VERSION }}"
+          echo "========================="
+
+      - name: Install Solana
+        shell: bash
+        if: steps.cache-solana.outputs.cache-hit != 'true' && env.SETUP_SOLANA_VERSION != ''
+        run: |
+          # Parse version numbers
+          MAJOR=$(echo $SOLANA_VERSION | cut -d. -f1)
+          MINOR=$(echo $SOLANA_VERSION | cut -d. -f2)
+          PATCH=$(echo $SOLANA_VERSION | cut -d. -f3)
+
+          # Determine which URL to use based on version
+          if [ "$MAJOR" -eq 1 ] && [ "$MINOR" -eq 18 ] && [ "$PATCH" -le 23 ]; then
+            INSTALL_URL="https://release.solana.com/v${SOLANA_VERSION}/install"
+          else
+            INSTALL_URL="https://release.anza.xyz/v${SOLANA_VERSION}/install"
+          fi
+
+          echo "Installing Solana from: $INSTALL_URL"
+          sh -c "$(curl -sSfL $INSTALL_URL)"
+        env:
+          SOLANA_VERSION: ${{ env.SETUP_SOLANA_VERSION }}
+
+      - name: Set Solana Path variables
+        if: env.SETUP_SOLANA_VERSION != ''
+        run: echo "/home/runner/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
+        shell: bash
+
+      - name: Create default keypair
+        if: env.SETUP_SOLANA_VERSION != ''
+        run: solana-keygen new -s --no-bip39-passphrase --force
+        shell: bash
+
+      - name: Set rpc connection to local host
+        if: env.SETUP_SOLANA_VERSION != ''
+        run: solana config set --url localhost
+        shell: bash
+
+      - name: Debug Version Values
+        if: env.SETUP_ANCHOR_VERSION != ''
+        shell: bash
+        run: |
+          echo "=== Debug Version Information ==="
+          VERSION="${{ env.SETUP_ANCHOR_VERSION }}"
+          echo "Using Anchor version: $VERSION"
+          echo "Cache key being used: anchor-cli-${{ runner.os }}-v0003-$VERSION"
+          echo "========================="
+
+      - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        if: env.SETUP_ANCHOR_VERSION != ''
+        name: Cache Anchor Cli
+        id: cache-anchor-cli
+        with:
+          path: |
+            ~/.cargo/bin/anchor
+          key: anchor-cli-${{ runner.os }}-v0003-${{ env.SETUP_ANCHOR_VERSION }}
+
+      - name: Install Anchor CLI
+        if: steps.cache-anchor-cli.outputs.cache-hit != 'true' && env.SETUP_ANCHOR_VERSION != ''
+        uses: taiki-e/install-action@e1c4cd42111751368541a7cb5db3522bd1f846a4 # v2.78.0
+        with:
+          tool: anchor-cli@${{ env.SETUP_ANCHOR_VERSION }}
+
+      - name: Verify Anchor Installation
+        if: env.SETUP_ANCHOR_VERSION != ''
+        shell: bash
+        run: anchor --version
+
+      - name: Debug Version Values
+        if: env.SOLANA_VERIFY_VERSION != ''
+        shell: bash
+        run: |
+          echo "=== Debug Version Information ==="
+          echo "Using solana-verify version: ${{ env.SOLANA_VERIFY_VERSION }}"
+          echo "Cache key being used: solana-verify-${{ runner.os }}-v0001-${{ env.SOLANA_VERIFY_VERSION }}"
+          echo "========================="
+
+      - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        if: env.SOLANA_VERIFY_VERSION != ''
+        name: Cache Solana Verify
+        id: cache-solana-verify
+        with:
+          path: |
+            ~/.cargo/bin/solana-verify
+          key: solana-verify-${{ runner.os }}-v0001-${{ env.SOLANA_VERIFY_VERSION }}
+
+      - name: Install Solana Verify
+        if: steps.cache-solana-verify.outputs.cache-hit != 'true' && env.SOLANA_VERIFY_VERSION != ''
+        uses: taiki-e/install-action@e1c4cd42111751368541a7cb5db3522bd1f846a4 # v2.78.0
+        with:
+          tool: solana-verify@${{ env.SOLANA_VERIFY_VERSION }}
+
+      - name: Verify Installation
+        if: env.SOLANA_VERIFY_VERSION != ''
+        shell: bash
+        run: solana-verify --version
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        if: inputs.node_version != ''
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        name: Cache Toml Cli
+        id: cache-toml-cli
+        with:
+          path: |
+            ~/.cargo/bin/toml
+          key: toml-cli-${{ runner.os }}-v0002
+
+      - name: Install toml-cli
+        if: steps.cache-toml-cli.outputs.cache-hit != 'true'
+        uses: taiki-e/install-action@e1c4cd42111751368541a7cb5db3522bd1f846a4 # v2.78.0
+        with:
+          tool: toml-cli
 
       - name: Extract Addresses from Keypairs
         run: |
@@ -252,12 +531,44 @@ jobs:
             echo "No Anchor.toml found (this is expected for native programs)"
           fi
 
-      - name: Build Anchor
-        uses: solana-foundation/github-actions/build-anchor@f0ddc2234ac4ac19c5c17f520b60bc2d7308744f # v0.2.11
+      # VENDORED: inlined from solana-foundation/github-actions/build-anchor@v0.2.11
+      - name: Build Program
+        shell: bash
+        run: |
+          echo "Building Anchor program: ${{ env.PROGRAM_NAME }} to get IDL"
+          FEATURES="${{ inputs.features }}"
+          if [ ! -z "$FEATURES" ]; then
+            FEATURES="--features $FEATURES"
+          fi
+
+          IGNORE_KEYS=""
+          ANCHOR_MAJOR=$(anchor --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | cut -d. -f1)
+          if [ "$ANCHOR_MAJOR" -ge 1 ] 2>/dev/null; then
+            IGNORE_KEYS="--ignore-keys"
+          fi
+
+          anchor build -p ${{ env.PROGRAM_NAME }} $IGNORE_KEYS -- $FEATURES
         if: steps.check-anchor.outputs.is_anchor == 'true'
-        with:
-          program: ${{ env.PROGRAM_NAME }}
-          features: ${{ inputs.features }}
+
+      - name: Copy artifacts from container
+        shell: bash
+        run: |
+          mkdir -p ./build-artifacts/so
+          mkdir -p ./build-artifacts/idl
+
+          echo "Current working directory: $(pwd)"
+          echo "Listing target directory:"
+          ls -la target/deploy/
+          ls -la target/idl/
+
+          # Direct copy without using Docker commands
+          cp -v target/deploy/${{ env.PROGRAM_NAME }}.so ./build-artifacts/so/
+          cp -v target/idl/${{ env.PROGRAM_NAME }}.json ./build-artifacts/idl/
+
+          echo "Checking copied files:"
+          ls -la ./build-artifacts/so/
+          ls -la ./build-artifacts/idl/
+        if: steps.check-anchor.outputs.is_anchor == 'true'
 
       # VENDORED: was `uses: build-verified@v0.2.11` (which hardcodes `-- --features <x>` and
       # cannot pass --no-default-features). Inlined so `build-args` is the verbatim cargo tail.
@@ -325,18 +636,191 @@ jobs:
             echo "IDL file: ./artifacts/build/${{ env.PROGRAM_NAME }}-idl/target/idl/${{ env.PROGRAM_NAME }}.json"
           fi
 
-      - name: Write Program Buffer
-        uses: solana-foundation/github-actions/write-program-buffer@f0ddc2234ac4ac19c5c17f520b60bc2d7308744f # v0.2.11
-        id: program-buffer
+      # VENDORED: inlined from solana-foundation/github-actions/write-program-buffer@v0.2.11
+      #   (defaults inlined: max-sign-attempts=100, write-timeout-minutes=55, retry-attempts=3,
+      #    use-rpc=true; internal ids renamed pb-check-program/program-buffer to avoid collisions)
+      - name: Write keypair
+        shell: bash
+        run: echo "$DEPLOY_KEYPAIR" > ./deploy-keypair.json && chmod 600 ./deploy-keypair.json
+        env:
+          DEPLOY_KEYPAIR: ${{ env.DEPLOYER_KEYPAIR }}
         if: inputs.deploy
+
+      - name: Get current program size if it exists
+        id: pb-check-program
+        shell: bash
+        run: |
+          set +e  # Don't exit on error
+
+          # Try to get program info, capture any error message
+          echo "Checking program info..."
+          PROGRAM_INFO=$(solana program show ${{ env.PROGRAM_ID }} -u ${{ env.DEPLOY_URL }} 2>&1)
+          EXIT_CODE=$?
+          if [ $EXIT_CODE -eq 0 ]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "Program exists, checking size..."
+            CURRENT_SIZE=$(echo "$PROGRAM_INFO" | grep "Data Length:" | sed -E 's/.*Data Length: ([0-9]+).*/\1/' | cut -d ' ' -f1)
+            echo "Current program data length: $CURRENT_SIZE"
+            echo "data_len=$CURRENT_SIZE" >> $GITHUB_OUTPUT
+          else
+            if echo "$PROGRAM_INFO" | grep -q "Unable to find the account"; then
+              echo "exists=false" >> $GITHUB_OUTPUT
+              echo "Program does not exist yet, skipping size check"
+            else
+              echo "Error checking program: $PROGRAM_INFO"
+              echo "exists=false" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+          set -e  # Restore error checking
+        if: inputs.deploy
+
+      - name: Resize program if needed
+        if: (inputs.deploy) && (steps.pb-check-program.outputs.exists == 'true')
+        shell: bash
+        run: |
+          REQUIRED_SIZE=$(wc -c < ./target/deploy/${{ env.PROGRAM_NAME }}.so)
+          CURRENT_SIZE="${{ steps.pb-check-program.outputs.data_len }}"
+          echo "Required size: $REQUIRED_SIZE"
+          echo "Current size: $CURRENT_SIZE"
+
+          if [ "$REQUIRED_SIZE" -gt "$CURRENT_SIZE" ]; then
+            EXTEND_SIZE=$((REQUIRED_SIZE - CURRENT_SIZE))
+            echo "Program needs to be extended by $EXTEND_SIZE bytes"
+            solana program extend ${{ env.PROGRAM_ID }} $EXTEND_SIZE \
+              --keypair ./deploy-keypair.json \
+              --url ${{ env.DEPLOY_URL }} \
+              --commitment confirmed
+          else
+            echo "Program size is sufficient"
+          fi
+
+      - name: Write program buffer
+        id: program-buffer
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PROGRAM_SO="./target/deploy/${{ env.PROGRAM_NAME }}.so"
+          BUFFER_KEYPAIR=$(mktemp ./buffer-keypair.XXXXXX.json)
+          rm -f "$BUFFER_KEYPAIR"
+          solana-keygen new --no-bip39-passphrase --silent --outfile "$BUFFER_KEYPAIR"
+          BUFFER=$(solana-keygen pubkey "$BUFFER_KEYPAIR")
+          DEPLOYER=$(solana-keygen pubkey ./deploy-keypair.json)
+          DUMPED_BUFFER=$(mktemp ./buffer-dump.XXXXXX.so)
+
+          echo "Creating program buffer $BUFFER"
+          echo "Deployer authority: $DEPLOYER"
+          echo "Program artifact size: $(wc -c < "$PROGRAM_SO") bytes"
+          echo "Program artifact sha256: $(shasum -a 256 "$PROGRAM_SO" | awk '{print $1}')"
+          echo "Max sign attempts: 100"
+          echo "Write timeout: 55 minutes"
+          echo "Write attempts: 3"
+          echo "Use RPC transport: true"
+
+          USE_RPC_ARGS=()
+          if [ "true" = "true" ]; then
+            USE_RPC_ARGS=(--use-rpc)
+          fi
+
+          ATTEMPT=1
+          STATUS=1
+          while [ "$ATTEMPT" -le "3" ]; do
+            WRITE_LOG="write-buffer-${ATTEMPT}.log"
+            echo "Starting write attempt $ATTEMPT of 3 for buffer $BUFFER"
+
+            set +e
+            timeout "55m" solana program write-buffer \
+              "$PROGRAM_SO" \
+              --url ${{ env.DEPLOY_URL }} \
+              --keypair ./deploy-keypair.json \
+              --buffer "$BUFFER_KEYPAIR" \
+              --max-sign-attempts 100 \
+              --with-compute-unit-price ${{ inputs.priority-fee }} \
+              "${USE_RPC_ARGS[@]}" \
+              2>&1 | tee "$WRITE_LOG"
+            STATUS=${PIPESTATUS[0]}
+            set -e
+
+            if [ "$STATUS" -eq 0 ]; then
+              if ! grep -q "Buffer:" "$WRITE_LOG"; then
+                echo "Warning: solana CLI output did not include a Buffer line; using pre-generated buffer address"
+              fi
+
+              echo "Found buffer: $BUFFER"
+              echo "buffer=$BUFFER" >> $GITHUB_OUTPUT
+              rm -f "$DUMPED_BUFFER"
+              exit 0
+            fi
+
+            if [ "$STATUS" -eq 124 ]; then
+              echo "Error: Buffer write attempt $ATTEMPT timed out after 55 minutes"
+            else
+              echo "Error: Buffer write attempt $ATTEMPT failed with exit code $STATUS"
+            fi
+
+            echo "Buffer account: $BUFFER"
+            echo "Checking whether the buffer was written despite the CLI exit status..."
+
+            rm -f "$DUMPED_BUFFER"
+            if solana program dump "$BUFFER" "$DUMPED_BUFFER" -u ${{ env.DEPLOY_URL }}; then
+              echo "Dumped buffer size: $(wc -c < "$DUMPED_BUFFER") bytes"
+              echo "Dumped buffer sha256: $(shasum -a 256 "$DUMPED_BUFFER" | awk '{print $1}')"
+
+              if cmp -s "$PROGRAM_SO" "$DUMPED_BUFFER"; then
+                echo "Buffer contents match the program artifact; continuing with buffer $BUFFER"
+                echo "buffer=$BUFFER" >> $GITHUB_OUTPUT
+                rm -f "$DUMPED_BUFFER"
+                exit 0
+              fi
+
+              echo "Dumped buffer does not match the program artifact"
+            else
+              echo "Could not dump buffer $BUFFER"
+            fi
+
+            if [ "$ATTEMPT" -lt "3" ]; then
+              echo "Retrying the same buffer so solana CLI can write only the missing chunks"
+              ATTEMPT=$((ATTEMPT + 1))
+              continue
+            fi
+
+            echo "Recent transactions for buffer $BUFFER:"
+            solana transaction-history "$BUFFER" -u ${{ env.DEPLOY_URL }} --limit 10 || true
+            echo "Open buffers still owned by deployer $DEPLOYER:"
+            solana program show --buffers --buffer-authority "$DEPLOYER" -u ${{ env.DEPLOY_URL }} || true
+            rm -f "$DUMPED_BUFFER"
+            exit "$STATUS"
+          done
+          rm -f "$DUMPED_BUFFER"
+
+        if: inputs.deploy
+
+      # We can not set authority and upgrade program in the same instruction so it needs to be here
+      # The rent for the buffer will be returned to the local keypair though once the program gets deployed in squads. So its fine.
+      # If the deploy fails you can also close the buffer with the multisig using the cli command squad-closebuffer
+      - name: Transfer buffer authority
+        if: (inputs.deploy) && (steps.pb-check-program.outputs.exists == 'true')
+        uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
         with:
-          program-id: ${{ env.PROGRAM_ID }}
-          program: ${{ env.PROGRAM_NAME }}
-          rpc-url: ${{ env.DEPLOY_URL }}
-          keypair: ${{ env.DEPLOYER_KEYPAIR }}
-          buffer-authority-address: ${{ inputs.use-squads == true && env.MULTISIG_VAULT ||
-            env.DEPLOYER_ADDRESS }}
-          priority-fee: ${{ inputs.priority-fee }}
+          timeout_minutes: 10
+          max_attempts: 50
+          shell: bash
+          command: |
+            BUFFER="${{ steps.program-buffer.outputs.buffer }}"
+            echo "Transferring buffer authority for $BUFFER to ${{ inputs.use-squads == true && env.MULTISIG_VAULT || env.DEPLOYER_ADDRESS }}"
+            solana program set-buffer-authority $BUFFER \
+              --keypair ./deploy-keypair.json \
+              --new-buffer-authority ${{ inputs.use-squads == true && env.MULTISIG_VAULT || env.DEPLOYER_ADDRESS }} \
+              --url ${{ env.DEPLOY_URL }}
+
+      - name: Cleanup
+        if: always() && (inputs.deploy)
+        shell: bash
+        run: |
+          rm -f ./deploy-keypair.json
+          rm -f ./authority-keypair.json
+          rm -f ./buffer-keypair.*.json
 
       # VENDORED: the programdata account is allocated with ZERO headroom (account size ==
       # 45-byte header + current program length). A Squads `Upgrade` to a larger program
@@ -376,37 +860,227 @@ jobs:
           fi
           rm -f ./deploy-keypair.json
 
-      - name: Write IDL Buffer (Anchor)
-        uses: solana-foundation/github-actions/write-idl-buffer@f0ddc2234ac4ac19c5c17f520b60bc2d7308744f # v0.2.11
-        id: idl-buffer
+      # VENDORED: inlined from solana-foundation/github-actions/write-idl-buffer@v0.2.11
+      #   (internal write step id renamed to idl-buffer)
+      - name: Write keypair
+        shell: bash
+        run: echo "$DEPLOY_KEYPAIR" > ./deploy-keypair.json && chmod 600 ./deploy-keypair.json
+        env:
+          DEPLOY_KEYPAIR: ${{ env.DEPLOYER_KEYPAIR }}
         if: inputs.upload_idl
-        with:
-          program-id: ${{ env.PROGRAM_ID }}
-          program: ${{ env.PROGRAM_NAME }}
-          rpc-url: ${{ env.DEPLOY_URL }}
-          keypair: ${{ env.DEPLOYER_KEYPAIR }}
-          idl-authority: ${{ inputs.use-squads && env.MULTISIG_VAULT ||
-            env.DEPLOYER_ADDRESS }}
 
-      - name: Program Upgrade
-        uses: solana-foundation/github-actions/program-upgrade@f0ddc2234ac4ac19c5c17f520b60bc2d7308744f # v0.2.11
+      - name: Check if IDL exists
+        id: check-idl
+        shell: bash
+        run: |
+          if anchor idl fetch ${{ env.PROGRAM_ID }} --provider.cluster ${{ env.DEPLOY_URL }} > /dev/null 2>&1; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+        if: inputs.upload_idl
+
+      - name: Write IDL buffer
+        id: idl-buffer
+        if: (inputs.upload_idl) && (steps.check-idl.outputs.exists == 'true')
+        uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
+        with:
+          timeout_minutes: 5
+          max_attempts: 3
+          shell: bash
+          command: |
+            # Write buffer with retries
+            for i in {1..5}; do
+              echo "Attempt $i to write IDL buffer..."
+              sleep $((i * 2))
+
+              anchor idl write-buffer ${{ env.PROGRAM_ID }} \
+                --filepath ./target/idl/${{ env.PROGRAM_NAME }}.json \
+                --provider.cluster ${{ env.DEPLOY_URL }} \
+                --priority-fee 100000 \
+                --provider.wallet ./deploy-keypair.json > buffer.out
+
+              BUFFER=$(cat buffer.out | grep -o 'Idl buffer created: [^ ]*' | cut -d' ' -f4)
+              if [ ! -z "$BUFFER" ]; then
+                echo "buffer=$BUFFER" >> $GITHUB_OUTPUT
+                break
+              fi
+            done
+
+            if [ -z "$BUFFER" ]; then
+              echo "Failed to create IDL buffer after 5 attempts"
+              exit 1
+            fi
+
+      - name: Set Buffer Authority
+        if: (inputs.upload_idl) && (steps.idl-buffer.outputs.buffer != '')
+        uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
+        with:
+          timeout_minutes: 5
+          max_attempts: 3
+          shell: bash
+          command: |
+            echo "Setting buffer authority..."
+            anchor idl set-authority ${{ steps.idl-buffer.outputs.buffer }} \
+              --program-id ${{ env.PROGRAM_ID }} \
+              --new-authority ${{ inputs.use-squads && env.MULTISIG_VAULT || env.DEPLOYER_ADDRESS }} \
+              --provider.cluster ${{ env.DEPLOY_URL }} \
+              --priority-fee 100000 \
+              --provider.wallet ./deploy-keypair.json
+
+      - name: Set Program IDL Authority
+        if: (inputs.upload_idl) && (steps.idl-buffer.outputs.buffer != '')
+        uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
+        with:
+          timeout_minutes: 5
+          max_attempts: 3
+          shell: bash
+          command: |
+            echo "Setting program IDL authority..."
+            anchor idl set-authority \
+              --program-id ${{ env.PROGRAM_ID }} \
+              --new-authority ${{ inputs.use-squads && env.MULTISIG_VAULT || env.DEPLOYER_ADDRESS }} \
+              --provider.cluster ${{ env.DEPLOY_URL }} \
+              --priority-fee 100000 \
+              --provider.wallet ./deploy-keypair.json || echo "Failed to set program IDL authority (this is ok if the authority is already set to squads for example)"
+
+      - name: Cleanup
+        if: always() && (inputs.upload_idl)
+        shell: bash
+        run: rm -f ./deploy-keypair.json
+
+      # VENDORED: inlined from solana-foundation/github-actions/program-upgrade@v0.2.11
+      #   (non-squads path; internal check id renamed pu-check-program)
+      - name: Write keypairs and optionally verify program-id keypair
+        shell: bash
+        run: |
+          echo "$DEPLOY_KEYPAIR" > ./deploy-keypair.json && chmod 600 ./deploy-keypair.json
+
+          if [ -z "$PROGRAM_KEYPAIR" ]; then
+            echo "ℹ️ No program-keypair provided — skipping program-id verification."
+          else
+            echo "$PROGRAM_KEYPAIR" > ./program-keypair.json && chmod 600 ./program-keypair.json
+
+            echo "🔍 Verifying program-keypair matches inputs.program-id..."
+            PROGRAM_PUBKEY=$(solana-keygen pubkey ./program-keypair.json)
+
+            echo "Expected: '${{ env.PROGRAM_ID }}'"
+            echo "Actual:   '$PROGRAM_PUBKEY'"
+
+            if [ "$PROGRAM_PUBKEY" != "${{ env.PROGRAM_ID }}" ]; then
+              echo "❌ Error: 'program-id' does not match public key of 'program-keypair'"
+              exit 1
+            fi
+
+            echo "✅ Verified: program-id matches program-keypair."
+          fi
+        env:
+          DEPLOY_KEYPAIR: ${{ env.DEPLOYER_KEYPAIR }}
+          PROGRAM_KEYPAIR: ${{ secrets.PROGRAM_ADDRESS_KEYPAIR }}
         if: inputs.deploy && inputs.use-squads == false
-        with:
-          program-id: ${{ env.PROGRAM_ID }}
-          program: ${{ env.PROGRAM_NAME }}
-          buffer: ${{ steps.program-buffer.outputs.buffer }}
-          rpc-url: ${{ env.DEPLOY_URL }}
-          keypair: ${{ env.DEPLOYER_KEYPAIR }}
-          program-keypair: ${{ secrets.PROGRAM_ADDRESS_KEYPAIR }}
 
-      - name: IDL Upload (Anchor)
-        uses: solana-foundation/github-actions/idl-upload@f0ddc2234ac4ac19c5c17f520b60bc2d7308744f # v0.2.11
-        if: inputs.upload_idl && inputs.use-squads == false
+      - name: Check if program exists
+        id: pu-check-program
+        shell: bash
+        run: |
+          if solana program show ${{ env.PROGRAM_ID }} --url ${{ env.DEPLOY_URL }} 2>&1 | grep -q "Data Length:"; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+
+            if [ -z "${{ secrets.PROGRAM_ADDRESS_KEYPAIR }}" ]; then
+              echo "❌ Error: program-keypair input is required for initial deployment (program does not exist yet)."
+              exit 1
+            fi
+          fi
+        if: inputs.deploy && inputs.use-squads == false
+
+      - name: Deploy new program
+        if: (inputs.deploy && inputs.use-squads == false) && (steps.pu-check-program.outputs.exists == 'false')
+        uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
         with:
-          program-id: ${{ env.PROGRAM_ID }}
-          rpc-url: ${{ env.DEPLOY_URL }}
-          keypair: ${{ env.DEPLOYER_KEYPAIR }}
-          idl-buffer: ${{ steps.idl-buffer.outputs.buffer }}
+          timeout_minutes: 10
+          max_attempts: 3
+          command: |
+            solana program deploy \
+              --url ${{ env.DEPLOY_URL }} \
+              --keypair ./deploy-keypair.json \
+              --program-id ./program-keypair.json \
+              --max-sign-attempts 50 \
+              --with-compute-unit-price 100000 \
+              --use-rpc \
+              ./target/deploy/${{ env.PROGRAM_NAME }}.so
+
+      - name: Upgrade existing program
+        if: (inputs.deploy && inputs.use-squads == false) && (steps.pu-check-program.outputs.exists == 'true')
+        uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
+        with:
+          timeout_minutes: 10
+          max_attempts: 3
+          command: |
+            echo "Debug: Buffer value is '${{ steps.program-buffer.outputs.buffer }}'"
+            if [ -z "${{ steps.program-buffer.outputs.buffer }}" ]; then
+              echo "Error: No buffer provided"
+              exit 1
+            fi
+
+            # Get current and new program sizes
+            CURRENT_SIZE=$(solana program show "${{ env.PROGRAM_ID }}" -u "${{ env.DEPLOY_URL }}" | grep "Data Length:" | cut -d ":" -f2 | cut -d " " -f2)
+            NEW_SIZE=$(wc -c < "./target/deploy/${{ env.PROGRAM_NAME }}.so")
+            echo "Current program size: $CURRENT_SIZE bytes"
+            echo "New program size: $NEW_SIZE bytes"
+
+            # Extend program if needed
+            if [ $NEW_SIZE -gt $CURRENT_SIZE ]; then
+              echo "Program needs to be extended"
+              solana program extend "${{ env.PROGRAM_ID }}" $((NEW_SIZE - CURRENT_SIZE)) -u "${{ env.DEPLOY_URL }}" -k ./deploy-keypair.json 
+              echo "Program extended successfully"
+            fi
+
+            # Upgrade program
+            solana program upgrade "${{ steps.program-buffer.outputs.buffer }}" "${{ env.PROGRAM_ID }}" -k ./deploy-keypair.json -u "${{ env.DEPLOY_URL }}"
+
+        env:
+          BUFFER: ${{ steps.program-buffer.outputs.buffer }}
+          PROGRAM_ID: ${{ env.PROGRAM_ID }}
+          PROGRAM: ${{ env.PROGRAM_NAME }}
+          RPC_URL: ${{ env.DEPLOY_URL }}
+
+      - name: Cleanup
+        if: always() && (inputs.deploy && inputs.use-squads == false)
+        shell: bash
+        run: |
+          rm -f ./deploy-keypair.json
+          rm -f ./program-keypair.json
+
+      # VENDORED: inlined from solana-foundation/github-actions/idl-upload@v0.2.11
+      #   (non-squads path; keeps ${{ env.PROGRAM_NAME }} reference from the parent job env)
+      - run: echo "$DEPLOY_KEYPAIR" > ./deploy-keypair.json && chmod 600 ./deploy-keypair.json
+        shell: bash
+        env:
+          DEPLOY_KEYPAIR: ${{ env.DEPLOYER_KEYPAIR }}
+        if: inputs.upload_idl && inputs.use-squads == false
+
+      - name: Upload IDL
+        uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
+        with:
+          timeout_minutes: 10
+          max_attempts: 50
+          shell: bash
+          command: |
+            echo "Checking if IDL exists for program ${{ env.PROGRAM_ID }}"
+            if ! anchor idl fetch ${{ env.PROGRAM_ID }} --provider.cluster ${{ env.DEPLOY_URL }} > /dev/null 2>&1; then
+              echo "IDL not found, initializing..."
+              anchor idl init --filepath ./target/idl/${{ env.PROGRAM_NAME }}.json ${{ env.PROGRAM_ID }} --provider.cluster ${{ env.DEPLOY_URL }} --provider.wallet ./deploy-keypair.json
+            else
+              echo "IDL found, setting buffer..."
+              anchor idl set-buffer --buffer ${{ steps.idl-buffer.outputs.buffer }} ${{ env.PROGRAM_ID }} --provider.cluster ${{ env.DEPLOY_URL }} --provider.wallet ./deploy-keypair.json
+            fi
+        if: inputs.upload_idl && inputs.use-squads == false
+
+      - run: rm ./deploy-keypair.json
+        shell: bash
+        if: always() && (inputs.upload_idl && inputs.use-squads == false)
 
       - name: Wait for program buffer to finalize
         if: inputs.use-squads == false
@@ -448,6 +1122,11 @@ jobs:
             echo "Verify PDA written. Run 'solana-verify remote submit-job --program-id ${{ env.PROGRAM_ID }} --uploader <deployer>' to queue the remote build."
           fi
 
+      # VENDORING EXCEPTION: squads-program-action is the only JS (node20) action here and the
+      # only one still pulled from solana-foundation. It builds a Squads v4 vaultTransactionCreate
+      # bundling the verify-PDA, Anchor IDL SetBuffer, and BPF Upgrade instructions in Squads'
+      # own compact TransactionMessage format, which no stock CLI can reproduce (a faithful
+      # replacement would need a bespoke Rust helper). Pinned by full commit SHA for immutability.
       - name: Create squads program upgrade transaction (verify pda, set program buffer)
         if: inputs.deploy && inputs.use-squads
         uses: solana-foundation/squads-program-action@839c079c881344c2da0365ad6a6bb07892e08e2f # v0.4.3
