@@ -14,11 +14,11 @@ name: Build + Deploy + Verify (vendored)
 #
 # Supply-chain hardening: every `solana-foundation/github-actions/*` composite action this
 # workflow used to call is now inlined below as native steps (marked "VENDORED:"), so no
-# third-party Solana action code is fetched at run time. Their transitive sub-actions
-# (taiki-e/install-action, nick-fields/retry, actions/cache) are kept as `uses:` pinned by
-# commit SHA. The one exception is `squads-program-action` (a compiled JS action): it cannot
-# be faithfully reproduced without a bespoke helper, so it stays pinned by SHA -- see the
-# "VENDORING EXCEPTION" note at that step.
+# third-party Solana action code is fetched at run time. Their transitive and GitHub-maintained
+# actions (taiki-e/install-action, nick-fields/retry, actions/*) are kept as `uses:` pinned by
+# commit SHA. The one exception to inlining is `squads-program-action` (a compiled JS action):
+# it cannot be faithfully reproduced without a bespoke helper, so it stays pinned by SHA --
+# see the "VENDORING EXCEPTION" note at that step.
 #
 # Maintenance note: this is a fork. Re-diff against upstream periodically for fixes /
 # new Solana image versions. Changes from upstream are marked "VENDORED:". The inlined action
@@ -81,8 +81,8 @@ on:
         required: false
         default: ""
       override-solana-version:
-        description: "The version is taken from the cargo.lock but you can also override
-          it here"
+        description: "The version is taken from Cargo.lock but can be overridden here; it
+          must match the SHA-pinned version maintained in this workflow"
         type: string
         required: false
         default: ""
@@ -126,6 +126,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
+      # VENDORED: the release archive and checksum are deliberately updated together. Supporting
+      # arbitrary versions here would make the download mutable and defeat checksum verification.
+      PINNED_SOLANA_VERSION: "2.3.0"
+      PINNED_SOLANA_RELEASE_SHA256: "56241fbe862495ff01b2b875195e44f94c22e9f2a504591a3ade1b9d82862730"
       SOLANA_VERIFY_VERSION: "0.5.0"
     outputs:
       buffer: ${{ steps.program-buffer.outputs.buffer }}
@@ -133,7 +137,9 @@ jobs:
       is_anchor: ${{ steps.check-anchor.outputs.is_anchor }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
 
       - name: Set Program ID from input
         run: |
@@ -308,6 +314,16 @@ jobs:
           echo "SETUP_SOLANA_VERSION=${{ inputs.override-solana-version != '' && inputs.override-solana-version || steps.versions.outputs.solana_version }}" >> "$GITHUB_ENV"
           echo "SETUP_ANCHOR_VERSION=${{ inputs.override-anchor-version != '' && inputs.override-anchor-version || steps.versions.outputs.anchor_version }}" >> "$GITHUB_ENV"
 
+      - name: Enforce SHA-pinned Solana version
+        if: env.SETUP_SOLANA_VERSION != ''
+        shell: bash
+        run: |
+          if [ "$SETUP_SOLANA_VERSION" != "$PINNED_SOLANA_VERSION" ]; then
+            echo "Unsupported Solana version: $SETUP_SOLANA_VERSION" >&2
+            echo "Update PINNED_SOLANA_VERSION and PINNED_SOLANA_RELEASE_SHA256 together to allow a new version." >&2
+            exit 1
+          fi
+
       # VENDORED: inlined from solana-foundation/github-actions/setup-all@v0.2.11
       #   (transitive taiki-e/install-action + actions/cache + actions/setup-node kept as
       #    SHA-pinned `uses:`; node install is gated on the `node_version` input, default empty)
@@ -344,22 +360,27 @@ jobs:
         shell: bash
         if: steps.cache-solana.outputs.cache-hit != 'true' && env.SETUP_SOLANA_VERSION != ''
         run: |
-          # Parse version numbers
-          MAJOR=$(echo $SOLANA_VERSION | cut -d. -f1)
-          MINOR=$(echo $SOLANA_VERSION | cut -d. -f2)
-          PATCH=$(echo $SOLANA_VERSION | cut -d. -f3)
+          archive="$(mktemp --tmpdir="$RUNNER_TEMP" solana-release.XXXXXX.tar.bz2)"
+          staging_dir="$(mktemp --directory --tmpdir="$RUNNER_TEMP" solana-release.XXXXXX)"
+          trap 'rm -f "$archive"; rm -rf "$staging_dir"' EXIT
 
-          # Determine which URL to use based on version
-          if [ "$MAJOR" -eq 1 ] && [ "$MINOR" -eq 18 ] && [ "$PATCH" -le 23 ]; then
-            INSTALL_URL="https://release.solana.com/v${SOLANA_VERSION}/install"
-          else
-            INSTALL_URL="https://release.anza.xyz/v${SOLANA_VERSION}/install"
-          fi
+          release_url="https://github.com/anza-xyz/agave/releases/download/v${SOLANA_VERSION}/solana-release-x86_64-unknown-linux-gnu.tar.bz2"
+          echo "Downloading SHA-pinned Solana ${SOLANA_VERSION} release"
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+            "$release_url" --output "$archive"
 
-          echo "Installing Solana from: $INSTALL_URL"
-          sh -c "$(curl -sSfL $INSTALL_URL)"
+          printf '%s  %s\n' "$SOLANA_RELEASE_SHA256" "$archive" | sha256sum --check --strict
+          tar -xjf "$archive" --strip-components=1 --directory "$staging_dir"
+          test -x "$staging_dir/bin/solana"
+
+          install_parent="$HOME/.local/share/solana/install"
+          install_dir="$install_parent/active_release"
+          mkdir -p "$install_parent"
+          rm -rf "$install_dir"
+          mv "$staging_dir" "$install_dir"
         env:
           SOLANA_VERSION: ${{ env.SETUP_SOLANA_VERSION }}
+          SOLANA_RELEASE_SHA256: ${{ env.PINNED_SOLANA_RELEASE_SHA256 }}
 
       - name: Set Solana Path variables
         if: env.SETUP_SOLANA_VERSION != ''
@@ -613,7 +634,7 @@ jobs:
 
       - name: Store so files
         if: ${{ !env.ACT }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ env.PROGRAM_NAME }}-so
           path: |
@@ -622,7 +643,7 @@ jobs:
       - name: Store idl files
         if: ${{ !env.ACT && hashFiles(format('./target/idl/{0}.json', env.PROGRAM_NAME))
           != '' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ env.PROGRAM_NAME }}-idl
           path: |
