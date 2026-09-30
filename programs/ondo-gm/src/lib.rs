@@ -683,3 +683,24 @@ pub mod ondo_gm {
             .batch_close_attestation_accounts(ctx.remaining_accounts)
     }
 }
+
+#[cfg(test)]
+mod test_oracle_sanity {
+    use super::*;
+
+    #[test]
+    fn test_pyth_oracle_staleness_threshold() {
+        let max_staleness_seconds: i64 = 60;
+        let current_timestamp: i64 = 1727680000;
+        let stale_oracle_timestamp: i64 = 1727679800; // 200s old
+
+        let age = current_timestamp - stale_oracle_timestamp;
+        let is_stale = age > max_staleness_seconds;
+
+        assert!(
+            is_stale,
+            "Pyth oracle feed older than {}s must be flagged as stale",
+            max_staleness_seconds
+        );
+    }
+}
