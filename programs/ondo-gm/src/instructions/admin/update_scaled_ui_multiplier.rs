@@ -6,6 +6,7 @@ use spl_token_2022::extension::scaled_ui_amount::instruction::update_multiplier;
 
 use crate::{
     constants::{MINT_AUTHORITY_SEED, USDON_MANAGER_STATE_SEED},
+    errors::OndoError,
     state::{RoleType, Roles, USDonManagerState},
 };
 
@@ -24,8 +25,7 @@ pub struct UpdateScaledUiMultiplier<'info> {
     )]
     pub authority_role_account: Account<'info, Roles>,
 
-    /// CHECK: This account is used to verify the mint authority,
-    /// Does not need to be checked for correctness as it is uninitialized.
+    /// CHECK: The seeds constraint validates this authority PDA; no account data is read.
     #[account(
         seeds = [MINT_AUTHORITY_SEED],
         bump
@@ -37,7 +37,7 @@ pub struct UpdateScaledUiMultiplier<'info> {
         mut,
         mint::authority = mint_authority,
         mint::token_program = token_program,
-        constraint = mint.key() != usdon_manager_state.usdon_mint @ crate::errors::OndoError::InvalidInputMint
+        constraint = mint.key() != usdon_manager_state.usdon_mint @ OndoError::InvalidInputMint
     )]
     pub mint: InterfaceAccount<'info, Mint>,
 
@@ -56,7 +56,7 @@ impl<'info> UpdateScaledUiMultiplier<'info> {
     /// Update the scaled UI multiplier for the specified mint
     /// # Arguments
     /// * `new_multiplier` - The new scaled UI multiplier to set
-    /// * `timestamp` - The timestamp at which the update is made
+    /// * `timestamp` - Unix timestamp when the new multiplier becomes effective
     /// * `bump` - The bump seed for the mint authority PDA
     pub fn update_scaled_ui_multiplier(
         &mut self,

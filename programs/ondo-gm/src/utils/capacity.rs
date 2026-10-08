@@ -3,7 +3,7 @@ use anchor_lang::prelude::*;
 use crate::{errors::OndoError, utils::mul_div};
 
 /// Calculate the updated capacity used after applying decay based on time elapsed.
-/// If the time since the last update exceeds the limit window, the capacity used is reset to zero.
+/// If the time since the last update reaches or exceeds the limit window, the capacity used is reset to zero.
 /// Otherwise, the capacity used is reduced based on the rate limit and time elapsed.
 /// # Arguments
 /// * `time_since_last_update` - The time elapsed since the last update in seconds.
@@ -30,7 +30,8 @@ pub fn calculate_capacity_used(
         // Full capacity restored
         Ok(0)
     } else {
-        // Validate limit_window is not zero to prevent division by zero
+        // limit_window is non-zero here: a zero window always takes the branch above, so this
+        // division cannot divide by zero (and a zero window restores full capacity every call)
         // Round down: Restores less capacity used, making rate limiting more strict
         let decay = mul_div(rate_limit, time_since_last_update_u64, limit_window, false)?;
 
@@ -136,14 +137,14 @@ mod tests {
 
     #[test]
     fn test_negative_time_since_last_update() {
-        // Negative time should be converted and capped
+        // Negative elapsed time is rejected before conversion to u64
         let result = calculate_capacity_used(
             -10,  // negative time
             60,   // 60 second window
             100,  // capacity used
             1000, // rate limit
         );
-        // Should fail on conversion from negative i64 to u64
+        // The explicit nonnegative-time guard rejects this input
         assert!(result.is_err());
     }
 

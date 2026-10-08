@@ -32,12 +32,12 @@ pub enum OndoError {
     AttestationExpirationTooLarge,
     #[msg("Invalid Role Type")]
     InvalidRoleType,
-    #[msg("GMToken Factory Paused")]
-    GMTokenFactoryPaused,
-    #[msg("GMToken Redemption Paused")]
-    GMTokenRedemptionPaused,
-    #[msg("GMToken Minting Paused")]
-    GMTokenMintingPaused,
+    #[msg("Token Factory Paused")]
+    TokenFactoryPaused,
+    #[msg("Token Redemption Paused")]
+    TokenRedemptionPaused,
+    #[msg("Token Minting Paused")]
+    TokenMintingPaused,
     #[msg("User is not whitelisted")]
     UserNotWhitelisted,
     #[msg("Price exceeds maximum allowed deviation")]
@@ -90,4 +90,18 @@ pub enum OndoError {
     MetadataFieldTooLong,
     #[msg("Time since last update has a negative value")]
     NegativeTimeSinceLastUpdate,
+    // secp256k1 verification errors: 7000-7099. Anchor's code is 6000 + the discriminant,
+    // and `= 1000` sets it here, so these keep their own block in both the program and the IDL.
+    #[msg("Missing or mismatched secp256k1 verification instruction")]
+    MissingOrMismatchedSecpIx = 1000,
+    #[msg("Malformed secp256k1 instruction")]
+    MalformedSecpIx,
+    #[msg("Wrong signature count")]
+    WrongSigCount,
+    #[msg("Expected 32-byte hash")]
+    WrongDigestLen,
+    #[msg("Digest mismatch")]
+    DigestMismatch,
+    #[msg("Recovered address mismatch")]
+    AddressMismatch,
 }

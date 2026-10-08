@@ -15,6 +15,7 @@ use crate::{
         ORACLE_SANITY_CHECK_SEED, TOKEN_LIMIT_ACCOUNT_SEED, USDON_MANAGER_STATE_SEED,
         WHITELIST_SEED,
     },
+    errors::OndoError,
     state::{GMTokenManagerState, OndoUser, OracleSanityCheck, TokenLimit, USDonManagerState},
 };
 
@@ -30,15 +31,15 @@ pub struct USDCSwapContext<'info> {
     #[account(
         mut,
         mint::authority = mint_authority,
-        mint::token_program = token_program
+        mint::token_program = token_program,
+        constraint = mint.key() != usdon_manager_state.usdon_mint @ OndoError::InvalidInputMint
     )]
     pub mint: Box<InterfaceAccount<'info, Mint>>,
 
     /// The mint authority PDA
     /// # PDA Seeds
     /// - MINT_AUTHORITY_SEED
-    /// CHECK: This account is used to verify the mint authority.
-    /// Does not need to be checked for correctness as it is uninitialized.
+    /// CHECK: The seeds constraint validates this authority PDA; no account data is read.
     #[account(
         seeds = [MINT_AUTHORITY_SEED],
         bump,
@@ -70,7 +71,7 @@ pub struct USDCSwapContext<'info> {
     )]
     pub token_limit_account: Box<Account<'info, TokenLimit>>,
 
-    /// The OracleSanityCheck account validating oracle price updates
+    /// The reference price, deviation band, and freshness bound checked against the quote
     /// # PDA Seeds
     /// - ORACLE_SANITY_CHECK_SEED
     /// - Mint address
@@ -130,9 +131,8 @@ pub struct USDCSwapContext<'info> {
     pub spl_token_program: Program<'info, Token>,
 
     /// The oracle price update account for USDC/USD price feed
-    /// Provides real-time price data for USDC token
-    /// Used in swap operations to calculate exchange rates
-    /// Must be recent (within oracle_price_max_age) to ensure price accuracy
+    /// When the guard is enabled, checks USDC price, confidence, and freshness.
+    /// Conversion remains 1:1 after decimal normalization; this feed does not reprice it.
     /// CHECK: Constraint using `has_one` in usdon_manager_state.
     /// `has_one` ensures that this account matches the expected oracle account stored in the `usdon_manager_state`.
     pub usdc_price_update: UncheckedAccount<'info>,
@@ -197,7 +197,7 @@ pub struct USDCSwapContext<'info> {
     )]
     pub usdon_manager_state: Box<Account<'info, USDonManagerState>>,
 
-    /// The GmTokenManagerState account managing GM Token operations
+    /// The GMTokenManagerState account managing GM Token operations
     /// - Stores protocol parameters like factory, redemption, and minting paused.
     /// # PDA Seeds
     /// - GMTOKEN_MANAGER_STATE_SEED
@@ -221,8 +221,7 @@ impl<'info> USDCSwapContext<'info> {
     /// # Safety
     /// This method uses &mut self to provide mutable references to the accounts,
     /// ensuring that the TokenManager can perform necessary operations safely.
-    #[allow(clippy::wrong_self_convention)]
-    pub fn into_token_manager(&mut self) -> TokenManager<'_, 'info> {
+    pub fn as_token_manager(&mut self) -> TokenManager<'_, 'info> {
         TokenManager {
             user: &mut self.user,
             mint: &mut self.mint,
@@ -234,8 +233,6 @@ impl<'info> USDCSwapContext<'info> {
             attestation_id_account: &mut self.attestation_id_account,
             whitelist: &self.whitelist,
             token_program: &self.token_program,
-            system_program: &self.system_program,
-            associated_token_program: &self.associated_token_program,
             spl_token_program: Some(&self.spl_token_program),
             usdc_price_update: Some(&self.usdc_price_update),
             usdc_vault: Some(&mut self.usdc_vault),

@@ -1,34 +1,21 @@
 use anchor_lang::prelude::*;
-use anchor_lang::solana_program::{
-    instruction::Instruction,
-    program::{invoke, invoke_signed},
-    system_instruction,
-    sysvar::instructions,
-};
 use anchor_spl::{
-    associated_token::AssociatedToken,
     token::Token,
     token_interface::{
         burn_checked, mint_to, transfer_checked, BurnChecked, Mint, MintTo, TokenAccount,
         TokenInterface, TransferChecked,
     },
 };
-use solana_keccak_hasher::hash;
-use solana_sdk_ids::secp256k1_program;
-
-// Import necessary dependencies from Pyth
-use pyth_solana_receiver_sdk::price_update::{get_feed_id_from_hex, PriceUpdateV2};
 
 use crate::{
     constants::*,
     errors::OndoError,
-    state::{
-        Attestation, GMTokenManagerState, OndoUser, OracleSanityCheck, TokenLimit,
-        USDonManagerState, Whitelist,
+    instructions::{
+        create_attestation_account, usdc_oracle_sanity_check, verify_attestation, verify_whitelist,
     },
-    utils::{calculate_capacity_used, mul_div, normalize_decimals},
+    state::{GMTokenManagerState, OndoUser, OracleSanityCheck, TokenLimit, USDonManagerState},
+    utils::{mul_div, normalize_decimals},
 };
-use anchor_lang::Discriminator;
 
 pub struct TokenManager<'a, 'info> {
     pub user: &'a mut Signer<'info>,
@@ -41,8 +28,6 @@ pub struct TokenManager<'a, 'info> {
     pub attestation_id_account: &'a mut UncheckedAccount<'info>,
     pub whitelist: &'a UncheckedAccount<'info>,
     pub token_program: &'a Interface<'info, TokenInterface>,
-    pub system_program: &'a Program<'info, System>,
-    pub associated_token_program: &'a Program<'info, AssociatedToken>,
     pub spl_token_program: Option<&'a Program<'info, Token>>,
     pub usdc_price_update: Option<&'a UncheckedAccount<'info>>,
     pub usdc_vault: Option<&'a mut InterfaceAccount<'info, TokenAccount>>,
@@ -110,550 +95,10 @@ impl<'a, 'info> TokenManager<'a, 'info> {
         Ok(())
     }
 
-    /// Initializes a new attestation account with the provided attestation ID, timestamp, and bump.
-    /// Marks the attestation ID as used to prevent replay attacks.
-    /// # Arguments
-    /// * `attestation_id` - A unique 16-byte identifier for the attestation.
-    /// * `timestamp` - The timestamp when the attestation was created.
-    /// * `bump` - The bump seed used for PDA derivation.
-    #[inline(always)]
-    pub fn initialize_attestation_account(
-        &mut self,
-        attestation_id: [u8; 16],
-        timestamp: i64,
-        bump: u8,
-    ) -> Result<()> {
-        // Check if the attestation account is uninitialized (lamports == 0)
-        if self.attestation_id_account.data_is_empty() {
-            // Calculate the required space for the attestation account
-            let space = 8 + Attestation::INIT_SPACE;
-
-            // Allocate space for the attestation account
-            invoke_signed(
-                &system_instruction::allocate(&self.attestation_id_account.key(), space as u64),
-                &[self.attestation_id_account.to_account_info()],
-                &[&[ATTESTATION_ID_SEED, attestation_id.as_ref(), &[bump]]],
-            )?;
-
-            // Fund the attestation account to be rent-exempt
-            invoke(
-                &system_instruction::transfer(
-                    &self.user.key(),
-                    &self.attestation_id_account.key(),
-                    Rent::get()?
-                        .minimum_balance(space)
-                        .saturating_sub(self.attestation_id_account.lamports()),
-                ),
-                &[
-                    self.user.to_account_info(),
-                    self.attestation_id_account.to_account_info(),
-                ],
-            )?;
-
-            // Assign the attestation account to the program
-            invoke_signed(
-                &system_instruction::assign(&self.attestation_id_account.key(), &crate::ID),
-                &[self.attestation_id_account.to_account_info()],
-                &[&[ATTESTATION_ID_SEED, attestation_id.as_ref(), &[bump]]],
-            )?;
-
-            // Borrow the attestation account data for writing
-            let mut data = self.attestation_id_account.try_borrow_mut_data()?;
-
-            // Write the discriminator
-            data[0..8].copy_from_slice(Attestation::DISCRIMINATOR);
-
-            // Create the attestation data
-            let attestation = Attestation {
-                attestation_id,
-                creator: self.user.key(),
-                created_at: timestamp,
-                bump,
-            };
-
-            // Serialize the attestation data into the account
-            attestation.serialize(&mut &mut data[8..])?;
-
-            Ok(())
-        } else {
-            Err(OndoError::AttestationAlreadyUsed.into())
-        }
-    }
-
-    /// Verifies the attestation signature using secp256k1.
-    /// # Arguments
-    /// * `chain_id` - A 32-byte identifier for the blockchain.
-    /// * `attestation_id` - A unique 16-byte identifier for the attestation.
-    /// * `side` - A byte indicating the side of the trade (e.g., buy/sell).
-    /// * `price` - The price associated with the attestation.
-    /// * `amount` - The amount associated with the attestation.
-    /// * `expiration` - The expiration timestamp of the attestation.
-    /// # Returns
-    /// * `Result<()>` - Ok if the signature is valid, Err otherwise.
-    #[allow(clippy::too_many_arguments)]
-    pub fn verify_attestation(
-        &self,
-        chain_id: [u8; 32],
-        attestation_id: [u8; 16],
-        side: u8,
-        price: u64,
-        amount: u64,
-        expiration: i64,
-    ) -> Result<()> {
-        // Get the expected Ethereum address from the gmtoken manager state
-        let eth_address = self.gmtoken_manager_state.attestation_signer_secp;
-        // Check that the Ethereum address is initialized (not all zeros)
-        require!(
-            eth_address != [0u8; 20],
-            OndoError::AttestationSignerEthAddressNotSet
-        );
-
-        // Calculate keccak256 hash of the quote
-        let quote_hash = self.calculate_quote_hash(
-            chain_id,
-            attestation_id,
-            side,
-            self.user.key(),
-            self.mint.key(),
-            price,
-            amount,
-            expiration,
-        );
-
-        // Verify the secp256k1 signature using the instructions sysvar
-        self.verify_secp256k1_ix(
-            self.instructions.to_account_info().as_ref(),
-            &quote_hash,
-            eth_address,
-        )?;
-
-        msg!("✓ Attestation signature verified");
-
-        Ok(())
-    }
-
-    /// Calculates the keccak256 hash of the quote parameters.
-    /// # Arguments
-    /// * `chain_id` - A 32-byte identifier for the blockchain.
-    /// * `attestation_id` - A unique 16-byte identifier for the attestation.
-    /// * `side` - A byte indicating the side of the trade (e.g., buy/sell).
-    /// * `user` - The public key of the user.
-    /// * `asset` - The public key of the asset (token mint).
-    /// * `price` - The price associated with the attestation.
-    /// * `amount` - The amount associated with the attestation.
-    /// * `expiration` - The expiration timestamp of the attestation.
-    /// # Returns
-    /// * `[u8; 32]` - The keccak256 hash of the quote.
-    #[allow(clippy::too_many_arguments)]
-    fn calculate_quote_hash(
-        &self,
-        chain_id: [u8; 32],
-        attestation_id: [u8; 16],
-        side: u8,
-        user: Pubkey,
-        asset: Pubkey,
-        price: u64,
-        amount: u64,
-        expiration: i64,
-    ) -> [u8; 32] {
-        // Concatenate:
-        //   chain_id (32)
-        // + attestation_id (16)
-        // + side (1)
-        // + user (32)
-        // + asset (32)
-        // + price (8)
-        // + amount (8)
-        // + expiration (8) = 137 bytes
-        let mut quote = [0u8; 137];
-        quote[0..32].copy_from_slice(&chain_id);
-        quote[32..48].copy_from_slice(&attestation_id);
-        quote[48] = side;
-        quote[49..81].copy_from_slice(&user.to_bytes());
-        quote[81..113].copy_from_slice(&asset.to_bytes());
-        quote[113..121].copy_from_slice(&price.to_be_bytes());
-        quote[121..129].copy_from_slice(&amount.to_be_bytes());
-        quote[129..137].copy_from_slice(&expiration.to_be_bytes());
-
-        // Calculate keccak256 hash of the quote
-        hash(&quote).to_bytes()
-    }
-
-    /// Verifies the secp256k1 instruction in the transaction.
-    /// # Arguments
-    /// * `ix_sysvar` - The instructions sysvar account info.
-    /// * `expected_digest32` - The expected 32-byte digest.
-    /// * `expected_eth_address20` - The expected 20-byte Ethereum address.
-    /// # Returns
-    /// * `Result<()>` - Ok if the instruction is found and matches, Err otherwise.
-    fn verify_secp256k1_ix(
-        &self,
-        ix_sysvar: &AccountInfo,
-        expected_digest32: &[u8; 32],
-        expected_eth_address20: [u8; 20],
-    ) -> Result<()> {
-        let current_ix_idx = instructions::load_current_index_checked(ix_sysvar)?;
-
-        require_gt!(current_ix_idx, 0, SecpError::MissingOrMismatchedSecpIx);
-
-        let ix_idx = current_ix_idx - 1;
-
-        let secp_ix = instructions::load_instruction_at_checked(ix_idx as usize, ix_sysvar)?;
-
-        require_keys_eq!(
-            secp_ix.program_id,
-            secp256k1_program::id(),
-            SecpError::MissingOrMismatchedSecpIx
-        );
-
-        self.secp_matches(
-            ix_idx as u8,
-            &secp_ix,
-            expected_digest32,
-            expected_eth_address20,
-        )?;
-
-        Ok(())
-    }
-
-    /// secp_matches checks if the given secp256k1 instruction matches the expected digest and Ethereum address.
-    /// The offsets struct points to signature(64+1 v), pubkey(64), and message digest(32).
-    /// # Arguments
-    /// * `ix` - The instruction to parse.
-    /// * `digest` - The expected 32-byte digest.
-    /// * `eth_addr` - The expected 20-byte Ethereum address.
-    /// # Returns
-    /// * `Result<bool>` - Ok(true) if the instruction matches, Err otherwise.
-    fn secp_matches(
-        &self,
-        ix_idx: u8,
-        ix: &Instruction,
-        digest: &[u8; 32],
-        eth_addr: [u8; 20],
-    ) -> Result<bool> {
-        let data = &ix.data;
-
-        // First byte is number of signatures; require 1 for this simple flow.
-        require!(!data.is_empty(), SecpError::MalformedSecpIx);
-        require!(data[0] == 1, SecpError::WrongSigCount);
-
-        // Skip the header and parse the first signature offsets (see program docs for exact layout).
-        // We specifically extract the recovered 64-byte pubkey (uncompressed x||y) the 20-byte address.
-        // Offset structure is 11 bytes starting at byte 1:
-        // [sig_off(2), sig_ix(1), eth_off(2), eth_ix(1), msg_off(2), msg_len(2), msg_ix(1)]
-        let rd = 1;
-        require!(data.len() >= rd + 11, SecpError::MalformedSecpIx);
-
-        // parse instruction data
-        let sig_ix = data[rd + 2];
-        let eth_off = u16::from_le_bytes([data[rd + 3], data[rd + 4]]) as usize;
-        let eth_ix = data[rd + 5];
-        let msg_off = u16::from_le_bytes([data[rd + 6], data[rd + 7]]) as usize;
-        let msg_len = u16::from_le_bytes([data[rd + 8], data[rd + 9]]) as usize;
-        let msg_ix = data[rd + 10];
-
-        require!(msg_len == 32, SecpError::WrongDigestLen);
-        require!(msg_off + msg_len <= data.len(), SecpError::MalformedSecpIx);
-        require!(eth_off + 20 <= data.len(), SecpError::MalformedSecpIx);
-        // only support "inline" mode, the instruction must refer to itself for the calldata.
-        // that is, the KeccakSecp256k11111111111111111111111111111 instruction must contain the signature, eth_address, and msg
-        require!(sig_ix == ix_idx, SecpError::MissingOrMismatchedSecpIx);
-        require!(eth_ix == ix_idx, SecpError::MissingOrMismatchedSecpIx);
-        require!(msg_ix == ix_idx, SecpError::MissingOrMismatchedSecpIx);
-
-        let msg = &data[msg_off..msg_off + 32];
-        let eth_addr_in_ix = &data[eth_off..eth_off + 20];
-
-        // The secp256k1 precompile has already verified:
-        // 1. signature is valid for keccak256(msg) where msg is the 32-byte digest
-        // 2. The signature recovers to the expected ETH address
-        // We just need to verify:
-        // - msg (the digest in the secp instruction) matches our calculated digest
-        // - ETH address in the instruction matches our expected ETH address
-        require!(msg == digest, SecpError::DigestMismatch);
-        require!(eth_addr_in_ix == eth_addr, SecpError::AddressMismatch);
-
-        Ok(true)
-    }
-
-    /// Performs sanity checks on the token price and update time.
-    /// # Arguments
-    /// * `price` - The current price to check.
-    /// * `current_timestamp` - The current timestamp.
-    /// # Returns
-    /// * `Result<()>` - Ok if all checks pass, Err otherwise.
-    pub fn sanity_check(&mut self, price: u64, current_timestamp: i64) -> Result<()> {
-        // Perform sanity checks on the token
-        // Ensure the price is within a reasonable range of the last price
-        let deviation = self
-            .sanity_check_account
-            .last_price
-            .checked_mul(self.sanity_check_account.allowed_deviation_bps)
-            .ok_or(OndoError::MathOverflow)?
-            .checked_div(BASIS_POINTS_DIVISOR)
-            .ok_or(OndoError::MathOverflow)?;
-
-        // Calculate maximum acceptable price
-        let max_price = self
-            .sanity_check_account
-            .last_price
-            .checked_add(deviation)
-            .ok_or(OndoError::MathOverflow)?;
-
-        // Calculate minimum acceptable price
-        let min_price = self
-            .sanity_check_account
-            .last_price
-            .checked_sub(deviation)
-            .ok_or(OndoError::MathOverflow)?;
-
-        // Check if the price is within the allowed deviation range
-        if price > max_price {
-            msg!(
-                "Price sanity check failed: price {} exceeds max_price {}. last_price={}, percentage_bp={}, deviation={}",
-                price, max_price, self.sanity_check_account.last_price, self.sanity_check_account.allowed_deviation_bps, deviation
-            );
-            return Err(OndoError::PriceExceedsMaxDeviation.into());
-        } else if price < min_price {
-            msg!(
-                "Price sanity check failed: price {} below min_price {}. last_price={}, percentage_bp={}, deviation={}",
-                price, min_price, self.sanity_check_account.last_price, self.sanity_check_account.allowed_deviation_bps, deviation
-            );
-            return Err(OndoError::PriceBelowMinDeviation.into());
-        }
-
-        // Check time since last price update
-        let elapsed_time = current_timestamp
-            .checked_sub(self.sanity_check_account.price_last_updated)
-            .ok_or(OndoError::MathOverflow)?;
-
-        // Ensure the price data is recent enough
-        if elapsed_time > self.sanity_check_account.max_time_delay {
-            return Err(OndoError::MaxTimeDelayExceeded.into());
-        }
-
-        Ok(())
-    }
-
-    /// Performs rate limit checks at both token and user levels.
-    /// # Arguments
-    /// * `price` - The current price of the token.
-    /// * `token_amount` - The amount of tokens involved in the transaction.
-    /// * `current_timestamp` - The current timestamp.
-    /// * `is_buy` - A boolean indicating if the transaction is a buy (true) or sell (false).
-    /// # Returns
-    /// * `Result<()>` - Ok if all checks pass, Err otherwise.
-    fn rate_limit_check(
-        &mut self,
-        price: u64,
-        token_amount: u64,
-        current_timestamp: i64,
-        is_buy: bool,
-    ) -> Result<()> {
-        // Round up: Conservative - counts more toward the rate limit
-        let amount = mul_div(price, token_amount, PRICE_SCALING_FACTOR as u64, true)?;
-
-        // Check token-level rate limit with linear decay
-        self.check_token_rate_limit(amount, current_timestamp, is_buy)?;
-
-        // Check user-level rate limit with linear decay
-        self.check_user_rate_limit(amount, current_timestamp, is_buy)?;
-
-        Ok(())
-    }
-
-    /// Checks and updates the token-level rate limit state.
-    /// # Arguments
-    /// * `amount` - The amount of tokens involved in the transaction.
-    /// * `current_timestamp` - The current timestamp.
-    /// * `is_buy` - A boolean indicating if the transaction is a buy (true) or sell (false).
-    /// # Returns
-    /// * `Result<()>` - Ok if the check passes, Err otherwise.
-    #[inline(always)]
-    fn check_token_rate_limit(
-        &mut self,
-        amount: u64,
-        current_timestamp: i64,
-        is_buy: bool,
-    ) -> Result<()> {
-        // Check if token-level rate limits are configured
-        if let (Some(token_rate_limit), Some(token_limit_window)) = (
-            self.token_limit_account.rate_limit,
-            self.token_limit_account.limit_window,
-        ) {
-            let (token_capacity_used, token_last_updated) = if is_buy {
-                (
-                    self.token_limit_account
-                        .mint_capacity_used
-                        .ok_or(OndoError::DataMismatch)?,
-                    self.token_limit_account
-                        .mint_last_updated
-                        .unwrap_or(current_timestamp),
-                )
-            } else {
-                (
-                    self.token_limit_account
-                        .redeem_capacity_used
-                        .ok_or(OndoError::DataMismatch)?,
-                    self.token_limit_account
-                        .redeem_last_updated
-                        .unwrap_or(current_timestamp),
-                )
-            };
-
-            // Calculate time since last update
-            let time_since_last_update = current_timestamp
-                .checked_sub(token_last_updated)
-                .ok_or(OndoError::MathOverflow)?;
-
-            // Calculate current capacity used with linear decay
-            let current_token_capacity_used = calculate_capacity_used(
-                time_since_last_update,
-                token_limit_window,
-                token_capacity_used,
-                token_rate_limit,
-            )?;
-
-            // Calculate available capacity
-            let available_token_capacity = if token_rate_limit > current_token_capacity_used {
-                token_rate_limit
-                    .checked_sub(current_token_capacity_used)
-                    .ok_or(OndoError::MathOverflow)?
-            } else {
-                0
-            };
-
-            // Check if the requested amount exceeds available capacity
-            if amount > available_token_capacity {
-                msg!(
-                    "Token rate limit exceeded: requested {} > available {}. rate_limit={}, capacity_used={}, window={}, time_since_update={}",
-                    amount, available_token_capacity, token_rate_limit, current_token_capacity_used,
-                    token_limit_window, time_since_last_update
-                );
-                return Err(OndoError::InvalidRateLimit.into());
-            }
-
-            // Update token rate limit state
-            if is_buy {
-                self.token_limit_account.mint_capacity_used = Some(
-                    current_token_capacity_used
-                        .checked_add(amount)
-                        .ok_or(OndoError::MathOverflow)?,
-                );
-                self.token_limit_account.mint_last_updated = Some(current_timestamp);
-            } else {
-                self.token_limit_account.redeem_capacity_used = Some(
-                    current_token_capacity_used
-                        .checked_add(amount)
-                        .ok_or(OndoError::MathOverflow)?,
-                );
-                self.token_limit_account.redeem_last_updated = Some(current_timestamp);
-            }
-        } else {
-            // Token limits are not properly configured - fail the transaction
-            return Err(OndoError::InvalidRateLimit.into());
-        }
-
-        Ok(())
-    }
-
-    /// Checks and updates the user-level rate limit state.
-    /// # Arguments
-    /// * `amount` - The amount of tokens involved in the transaction.
-    /// * `current_timestamp` - The current timestamp.
-    /// * `is_buy` - A boolean indicating if the transaction is a buy (true) or sell (false).
-    /// # Returns
-    /// * `Result<()>` - Ok if the check passes, Err otherwise.
-    #[inline(always)]
-    fn check_user_rate_limit(
-        &mut self,
-        amount: u64,
-        current_timestamp: i64,
-        is_buy: bool,
-    ) -> Result<()> {
-        if let (Some(user_rate_limit), Some(user_limit_window)) =
-            (self.ondo_user.rate_limit, self.ondo_user.limit_window)
-        {
-            let (user_capacity_used, user_last_updated) = if is_buy {
-                (
-                    self.ondo_user
-                        .mint_capacity_used
-                        .ok_or(OndoError::DataMismatch)?,
-                    self.ondo_user
-                        .mint_last_updated
-                        .unwrap_or(current_timestamp),
-                )
-            } else {
-                (
-                    self.ondo_user
-                        .redeem_capacity_used
-                        .ok_or(OndoError::DataMismatch)?,
-                    self.ondo_user
-                        .redeem_last_updated
-                        .unwrap_or(current_timestamp),
-                )
-            };
-
-            // Calculate time since last update
-            let time_since_last_update = current_timestamp
-                .checked_sub(user_last_updated)
-                .ok_or(OndoError::MathOverflow)?;
-
-            // Calculate current capacity used with linear decay
-            let current_user_capacity_used = calculate_capacity_used(
-                time_since_last_update,
-                user_limit_window,
-                user_capacity_used,
-                user_rate_limit,
-            )?;
-
-            // Calculate available capacity
-            let available_user_capacity = if user_rate_limit > current_user_capacity_used {
-                user_rate_limit
-                    .checked_sub(current_user_capacity_used)
-                    .ok_or(OndoError::MathOverflow)?
-            } else {
-                0
-            };
-
-            // Check if the requested amount exceeds available capacity
-            if amount > available_user_capacity {
-                msg!(
-                    "User rate limit exceeded: requested {} > available {}. rate_limit={}, capacity_used={}, window={}, time_since_update={}",
-                    amount, available_user_capacity, user_rate_limit, current_user_capacity_used,
-                    user_limit_window, time_since_last_update
-                );
-                return Err(OndoError::InvalidRateLimit.into());
-            }
-
-            // Update user rate limit state
-            if is_buy {
-                self.ondo_user.mint_capacity_used = Some(
-                    current_user_capacity_used
-                        .checked_add(amount)
-                        .ok_or(OndoError::MathOverflow)?,
-                );
-                self.ondo_user.mint_last_updated = Some(current_timestamp);
-            } else {
-                self.ondo_user.redeem_capacity_used = Some(
-                    current_user_capacity_used
-                        .checked_add(amount)
-                        .ok_or(OndoError::MathOverflow)?,
-                );
-                self.ondo_user.redeem_last_updated = Some(current_timestamp);
-            }
-        } else {
-            // User limits are not properly configured - fail the transaction
-            return Err(OndoError::InvalidRateLimit.into());
-        }
-
-        Ok(())
-    }
-
     /// Swaps USDC tokens for USDon tokens (1:1 exchange).
     ///
     /// This method handles the conversion of USDC to USDon tokens with the following steps:
-    /// 1. Validates input amount and retrieves current USDC price from the USDC price oracle
+    /// 1. Validates the amount and, if enabled, applies the USDC oracle guard without repricing
     /// 2. Transfers USDC from user to protocol vault
     /// 3. Returns the calculated USDon amount to be burned
     ///
@@ -668,7 +113,11 @@ impl<'a, 'info> TokenManager<'a, 'info> {
 
         // Perform sanity checks on the USDC token
         if self.usdon_manager_state.oracle_price_enabled {
-            self.usdc_oracle_sanity_check()?;
+            usdc_oracle_sanity_check(
+                self.usdc_price_update
+                    .ok_or(OndoError::USDCOracleNotProvided)?,
+                self.usdon_manager_state,
+            )?;
         }
 
         let usdc_mint = self.usdc_mint.as_ref().ok_or(OndoError::InvalidInputMint)?;
@@ -708,15 +157,14 @@ impl<'a, 'info> TokenManager<'a, 'info> {
             false,
         )?;
 
-        // Return the calculated USDon amount for minting to user
-        // Note: Actual USDon burn happens in the calling instruction
+        // Return the USDon amount to burn from the vault in the calling instruction
         Ok(normalized_amount_out)
     }
 
     /// Swaps USDon tokens for USDC tokens (1:1 exchange).
     ///
     /// This method handles the conversion of USDon to USDC tokens with the following steps:
-    /// 1. Validates input amount and retrieves current USDC price from a USDC price oracle
+    /// 1. Validates the amount and, if enabled, applies the USDC oracle guard without repricing
     /// 2. Transfers USDon from user to protocol vault
     /// 3. Transfers USDC from protocol vault to user
     ///
@@ -731,7 +179,11 @@ impl<'a, 'info> TokenManager<'a, 'info> {
 
         // Perform sanity checks on the USDC token
         if self.usdon_manager_state.oracle_price_enabled {
-            self.usdc_oracle_sanity_check()?;
+            usdc_oracle_sanity_check(
+                self.usdc_price_update
+                    .ok_or(OndoError::USDCOracleNotProvided)?,
+                self.usdon_manager_state,
+            )?;
         }
 
         let usdc_mint = self.usdc_mint.as_ref().ok_or(OndoError::InvalidInputMint)?;
@@ -802,116 +254,11 @@ impl<'a, 'info> TokenManager<'a, 'info> {
 
         Ok(())
     }
-
-    #[inline(always)]
-    fn usdc_oracle_sanity_check(&self) -> Result<()> {
-        // Retrieve the USDC price update account info
-        let usdc_price_update_info = self
-            .usdc_price_update
-            .as_ref()
-            .ok_or(OndoError::USDCOracleNotProvided)?
-            .to_account_info();
-
-        let usdc_price = match usdc_price_update_info.key() {
-            USDC_PYTH_ORACLE_ADDRESS => {
-                // Fetch the feed ID for the USDC token price from its hex representation.
-                let usdc_feed_id: [u8; 32] = get_feed_id_from_hex(USDC_PYTH_ID)?;
-
-                // Deserialize `usdc_price_update_info` account data into PriceUpdateV2 struct
-                let data = usdc_price_update_info.try_borrow_data()?;
-                let usdc_price_update_data = PriceUpdateV2::try_deserialize(&mut &data[..])?;
-
-                // Retrieve current USDC/USD price from Pyth oracle with freshness validation
-                // This ensures we're using recent price data to prevent stale price attacks
-                let price_update_data = usdc_price_update_data.get_price_no_older_than(
-                    &Clock::get()?,
-                    self.usdon_manager_state.oracle_price_max_age,
-                    &usdc_feed_id,
-                )?;
-
-                // Validate confidence interval is within threshold
-                // Reject prices with high uncertainty to prevent using unreliable oracle data
-                require!(price_update_data.price > 0, OndoError::InvalidPrice);
-
-                // Check exponent is negative (Pyth convention)
-                require!(
-                    price_update_data.exponent < 0,
-                    OndoError::InvalidPriceExponent
-                );
-
-                let conf = price_update_data.conf as u128;
-                let price = price_update_data.price as u128;
-
-                // Check: conf * 100 <= price * CONFIDENCE_THRESHOLD (equivalent to conf/price <= CONFIDENCE_THRESHOLD %)
-                let conf_times_100 = conf.checked_mul(100).ok_or(OndoError::MathOverflow)?;
-                let price_times_threshold = price
-                    .checked_mul(CONFIDENCE_THRESHOLD)
-                    .ok_or(OndoError::MathOverflow)?;
-
-                require!(
-                    conf_times_100 <= price_times_threshold,
-                    OndoError::ConfidenceThresholdExceeded
-                );
-
-                let from_decimals = u8::try_from(-price_update_data.exponent)
-                    .map_err(|_| OndoError::InvalidPriceExponent)?;
-
-                normalize_decimals(
-                    price_update_data.price as u64, // Safe to cast as we required price > 0 above
-                    from_decimals,
-                    USDC_PRICE_DECIMALS,
-                    false,
-                )?
-            }
-            _ => return err!(OndoError::USDCOracleNotImplemented),
-        };
-
-        // Validate that USDC price is above minimum threshold
-        require_gte!(usdc_price, MIN_PRICE, OndoError::USDCBelowMinimumPrice);
-
-        Ok(())
-    }
-
-    /// Verifies that the user is whitelisted by checking the whitelist account.
-    /// # Returns
-    /// * `Result<()>` - Ok if the user is whitelisted, Err(UserNotWhitelisted) otherwise.
-    #[inline(always)]
-    pub fn verify_whitelist(&self) -> Result<()> {
-        let whitelist_data = self.whitelist.try_borrow_data()?;
-        if whitelist_data.len() < 8 || whitelist_data[..8] != *Whitelist::DISCRIMINATOR {
-            return Err(OndoError::UserNotWhitelisted.into());
-        }
-        Ok(())
-    }
-
-    /// Initializes the Ondo user account if it is not already initialized.
-    /// Sets the owner, mint, rate limit, limit window, and bump values.
-    /// # Arguments
-    /// * `bump` - The bump seed used for PDA derivation.
-    /// # Returns
-    /// * `Result<()>` - Ok if initialization is successful or already initialized, Err otherwise
-    #[inline(always)]
-    pub fn initialize_ondo_user(&mut self, bump: u8) -> Result<()> {
-        if self.ondo_user.owner != self.user.key() {
-            self.ondo_user.owner = self.user.key();
-            self.ondo_user.mint = self.mint.key();
-            self.ondo_user.rate_limit = self.token_limit_account.default_user_rate_limit;
-            self.ondo_user.limit_window = self.token_limit_account.default_user_limit_window;
-            self.ondo_user.mint_capacity_used = Some(0);
-            self.ondo_user.mint_last_updated = None;
-            self.ondo_user.redeem_capacity_used = Some(0);
-            self.ondo_user.redeem_last_updated = None;
-            self.ondo_user.bump = bump;
-
-            msg!("User initialized");
-        }
-
-        Ok(())
-    }
 }
 
 /// Mints GM Tokens to the user's token account after verifying the attestation.
-/// Transfers USDon or burns USDon based on the user's payment choice.
+/// USDon payments transfer to the vault; USDC payments transfer to the USDC vault
+/// and burn the corresponding USDon from the USDon vault.
 /// # Arguments
 /// * `ctx` - The TokenManager context containing all necessary accounts.
 /// * `attestation_id` - A unique 16-byte identifier for the attestation.
@@ -942,21 +289,21 @@ pub fn mint_with_attestation(
     // Check if minting is paused
     require!(
         !ctx.gmtoken_manager_state.minting_paused,
-        OndoError::GMTokenMintingPaused
+        OndoError::TokenMintingPaused
     );
 
     // Check if token-level minting is paused
     require!(
         !ctx.token_limit_account.minting_paused,
-        OndoError::GMTokenMintingPaused
+        OndoError::TokenMintingPaused
     );
 
     // Verify user is whitelisted
-    ctx.verify_whitelist()?;
+    verify_whitelist(&ctx.whitelist.try_borrow_data()?)?;
 
     // Validate input parameters
-    require_gt!(amount, 0);
-    require_gt!(price, 0);
+    require_gt!(amount, 0, OndoError::InvalidAmount);
+    require_gt!(price, 0, OndoError::InvalidPrice);
 
     let current_timestamp = Clock::get()?.unix_timestamp;
 
@@ -972,37 +319,51 @@ pub fn mint_with_attestation(
     );
 
     // Create ondo user account if it doesn't exist
-    ctx.initialize_ondo_user(ondo_user_bump)?;
+    ctx.ondo_user.initialize(
+        &ctx.user.key(),
+        &ctx.mint.key(),
+        ctx.token_limit_account.default_user_rate_limit,
+        ctx.token_limit_account.default_user_limit_window,
+        ondo_user_bump,
+    );
 
     // Create attestation account if it doesn't exist marking the attestation as consumed
-    ctx.initialize_attestation_account(
+    create_attestation_account(
+        ctx.user,
+        ctx.attestation_id_account,
         attestation_id,
         current_timestamp,
         attestation_id_account_bump,
     )?;
 
     // Verify the attestation signature
-    ctx.verify_attestation(
+    verify_attestation(
         CHAIN_ID.to_bytes(),
         attestation_id,
         BUY,
         price,
         amount,
         expiration,
+        ctx.user.key(),
+        ctx.mint.key(),
+        ctx.instructions,
+        ctx.gmtoken_manager_state.attestation_signer_secp,
     )?;
 
     // Perform sanity check
-    ctx.sanity_check(price, current_timestamp)?;
+    ctx.sanity_check_account
+        .sanity_check(price, current_timestamp)?;
 
     // Check rate limit of the GM Token and user
-    ctx.rate_limit_check(price, amount, current_timestamp, true)?;
+    let amount_sent = mul_div(price, amount, PRICE_SCALING_FACTOR as u64, true)?;
+    ctx.token_limit_account
+        .check_and_update_limit(amount_sent, current_timestamp, true)?;
+    ctx.ondo_user
+        .check_and_update_limit(amount_sent, current_timestamp, true)?;
 
     // Handle payment based on user's choice of USDon or USDC
     match is_usdon {
         true => {
-            // Round up: Favours the protocol
-            let amount_sent = mul_div(price, amount, PRICE_SCALING_FACTOR as u64, true)?;
-
             require_gt!(amount_sent, 0, OndoError::InvalidAmount);
 
             // Transfer USDon from user's token account to USDon vault
@@ -1026,9 +387,6 @@ pub fn mint_with_attestation(
                 .as_ref()
                 .ok_or(OndoError::InvalidInputMint)?
                 .decimals;
-
-            // Calculate the amount of USDC to be sent based on the price
-            let amount_sent = mul_div(price, amount, PRICE_SCALING_FACTOR as u64, true)?;
 
             // Normalize amount from GM Token decimals to USDC decimals
             let normalized_amount =
@@ -1101,21 +459,21 @@ pub fn redeem_with_attestation(
     // Check if redemptions are paused
     require!(
         !ctx.gmtoken_manager_state.redemption_paused,
-        OndoError::GMTokenRedemptionPaused
+        OndoError::TokenRedemptionPaused
     );
 
     // Check if token-level redemptions are paused
     require!(
         !ctx.token_limit_account.redemption_paused,
-        OndoError::GMTokenRedemptionPaused
+        OndoError::TokenRedemptionPaused
     );
 
     // Verify user is whitelisted
-    ctx.verify_whitelist()?;
+    verify_whitelist(&ctx.whitelist.try_borrow_data()?)?;
 
     // Validate input parameters
-    require_gt!(amount, 0);
-    require_gt!(price, 0);
+    require_gt!(amount, 0, OndoError::InvalidAmount);
+    require_gt!(price, 0, OndoError::InvalidPrice);
 
     let current_timestamp = Clock::get()?.unix_timestamp;
 
@@ -1132,30 +490,50 @@ pub fn redeem_with_attestation(
     );
 
     // Create ondo user account if it doesn't exist
-    ctx.initialize_ondo_user(ondo_user_bump)?;
+    ctx.ondo_user.initialize(
+        &ctx.user.key(),
+        &ctx.mint.key(),
+        ctx.token_limit_account.default_user_rate_limit,
+        ctx.token_limit_account.default_user_limit_window,
+        ondo_user_bump,
+    );
 
     // Create attestation account if it doesn't exist marking the attestation as consumed
-    ctx.initialize_attestation_account(
+    create_attestation_account(
+        ctx.user,
+        ctx.attestation_id_account,
         attestation_id,
         current_timestamp,
         attestation_id_account_bump,
     )?;
 
     // Verify the attestation signature
-    ctx.verify_attestation(
+    verify_attestation(
         CHAIN_ID.to_bytes(),
         attestation_id,
         SELL,
         price,
         amount,
         expiration,
+        ctx.user.key(),
+        ctx.mint.key(),
+        ctx.instructions,
+        ctx.gmtoken_manager_state.attestation_signer_secp,
     )?;
 
     // Perform sanity check
-    ctx.sanity_check(price, current_timestamp)?;
+    ctx.sanity_check_account
+        .sanity_check(price, current_timestamp)?;
 
     // Check rate limit of the GM Token and user
-    ctx.rate_limit_check(price, amount, current_timestamp, false)?;
+    let rate_limited_amount = mul_div(price, amount, PRICE_SCALING_FACTOR as u64, true)?;
+    ctx.token_limit_account.check_and_update_limit(
+        rate_limited_amount,
+        current_timestamp,
+        false,
+    )?;
+    ctx.ondo_user
+        .check_and_update_limit(rate_limited_amount, current_timestamp, false)?;
 
     // Round down: Protocol pays - protects the protocol
     let mint_amount = mul_div(price, amount, PRICE_SCALING_FACTOR as u64, false)?;
@@ -1200,82 +578,16 @@ pub fn redeem_with_attestation(
     )
 }
 
-/// Errors related to secp256k1 signature verification.
-#[error_code]
-pub enum SecpError {
-    #[msg("Missing or mismatched secp256k1 verification instruction")]
-    MissingOrMismatchedSecpIx,
-    #[msg("Malformed secp256k1 instruction")]
-    MalformedSecpIx,
-    #[msg("Wrong signature count")]
-    WrongSigCount,
-    #[msg("Expected 32-byte hash")]
-    WrongDigestLen,
-    #[msg("Digest mismatch")]
-    DigestMismatch,
-    #[msg("Recovered address mismatch")]
-    AddressMismatch,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use proptest::prelude::*;
+    use pyth_solana_receiver_sdk::price_update::PriceUpdateV2;
 
-    // Helper functions for sanity check testing
-    fn validate_price_deviation(
-        sanity_check: &OracleSanityCheck,
-        price: u64,
-    ) -> std::result::Result<(), OndoError> {
-        let deviation = sanity_check
-            .last_price
-            .checked_mul(sanity_check.allowed_deviation_bps)
-            .ok_or(OndoError::MathOverflow)?
-            .checked_div(BASIS_POINTS_DIVISOR)
-            .ok_or(OndoError::MathOverflow)?;
-
-        let max_price = sanity_check
-            .last_price
-            .checked_add(deviation)
-            .ok_or(OndoError::MathOverflow)?;
-
-        let min_price = sanity_check
-            .last_price
-            .checked_sub(deviation)
-            .ok_or(OndoError::MathOverflow)?;
-
-        if price > max_price {
-            return Err(OndoError::PriceExceedsMaxDeviation);
-        } else if price < min_price {
-            return Err(OndoError::PriceBelowMinDeviation);
-        }
-
-        Ok(())
-    }
-
-    fn validate_time_delay(
-        sanity_check: &OracleSanityCheck,
-        current_timestamp: i64,
-    ) -> std::result::Result<(), OndoError> {
-        let elapsed_time = current_timestamp
-            .checked_sub(sanity_check.price_last_updated)
-            .ok_or(OndoError::MathOverflow)?;
-
-        if elapsed_time > sanity_check.max_time_delay {
-            return Err(OndoError::MaxTimeDelayExceeded);
-        }
-
-        Ok(())
-    }
-
-    fn validate_sanity_check(
-        sanity_check: &OracleSanityCheck,
-        price: u64,
-        current_timestamp: i64,
-    ) -> std::result::Result<(), OndoError> {
-        validate_price_deviation(sanity_check, price)?;
-        validate_time_delay(sanity_check, current_timestamp)?;
-        Ok(())
+    // Isolates the deviation band: checking at the reference's own update time
+    // means zero elapsed time, so freshness always passes.
+    fn validate_price_deviation(sanity_check: &OracleSanityCheck, price: u64) -> Result<()> {
+        sanity_check.sanity_check(price, sanity_check.price_last_updated)
     }
 
     #[test]
@@ -1331,12 +643,12 @@ mod tests {
         // Test price slightly above upper bound (should fail)
         let result = validate_price_deviation(&sanity_check, 1_050_000_001);
         assert!(result.is_err());
-        assert!(matches!(result, Err(OndoError::PriceExceedsMaxDeviation)));
+        assert_eq!(result, Err(OndoError::PriceExceedsMaxDeviation.into()));
 
         // Test price slightly below lower bound (should fail)
         let result = validate_price_deviation(&sanity_check, 949_999_999);
         assert!(result.is_err());
-        assert!(matches!(result, Err(OndoError::PriceBelowMinDeviation)));
+        assert_eq!(result, Err(OndoError::PriceBelowMinDeviation.into()));
     }
 
     #[test]
@@ -1355,21 +667,21 @@ mod tests {
         // Test within time limit (should pass)
         // 6 days = 6 * 86400 = 518400 seconds
         let current_timestamp = base_timestamp + (6 * SECONDS_PER_DAY);
-        let result = validate_time_delay(&sanity_check, current_timestamp);
+        let result = sanity_check.validate_freshness(current_timestamp);
         assert!(result.is_ok());
 
         // Test exactly at time limit (should pass)
         // 7 days = 7 * 86400 = 604800 seconds
         let current_timestamp = base_timestamp + (7 * SECONDS_PER_DAY);
-        let result = validate_time_delay(&sanity_check, current_timestamp);
+        let result = sanity_check.validate_freshness(current_timestamp);
         assert!(result.is_ok());
 
         // Test beyond time limit (should fail)
         // 8 days = 8 * 86400 = 691200 seconds
         let current_timestamp = base_timestamp + (8 * SECONDS_PER_DAY);
-        let result = validate_time_delay(&sanity_check, current_timestamp);
+        let result = sanity_check.validate_freshness(current_timestamp);
         assert!(result.is_err());
-        assert!(matches!(result, Err(OndoError::MaxTimeDelayExceeded)));
+        assert_eq!(result, Err(OndoError::MaxTimeDelayExceeded.into()));
     }
 
     #[test]
@@ -1445,19 +757,19 @@ mod tests {
 
         // Valid price and time (should pass)
         let current_timestamp = base_timestamp + (5 * SECONDS_PER_DAY);
-        let result = validate_sanity_check(&sanity_check, 1_020_000_000, current_timestamp);
+        let result = sanity_check.sanity_check(1_020_000_000, current_timestamp);
         assert!(result.is_ok());
 
         // Invalid price but valid time (should fail on price)
-        let result = validate_sanity_check(&sanity_check, 1_100_000_000, current_timestamp);
+        let result = sanity_check.sanity_check(1_100_000_000, current_timestamp);
         assert!(result.is_err());
-        assert!(matches!(result, Err(OndoError::PriceExceedsMaxDeviation)));
+        assert_eq!(result, Err(OndoError::PriceExceedsMaxDeviation.into()));
 
         // Valid price but invalid time (should fail on time)
         let current_timestamp = base_timestamp + (10 * SECONDS_PER_DAY);
-        let result = validate_sanity_check(&sanity_check, 1_020_000_000, current_timestamp);
+        let result = sanity_check.sanity_check(1_020_000_000, current_timestamp);
         assert!(result.is_err());
-        assert!(matches!(result, Err(OndoError::MaxTimeDelayExceeded)));
+        assert_eq!(result, Err(OndoError::MaxTimeDelayExceeded.into()));
     }
 
     #[test]
@@ -1509,11 +821,11 @@ mod tests {
             bump: 0,
         };
 
-        let result = validate_time_delay(&sanity_check, base_timestamp);
+        let result = sanity_check.validate_freshness(base_timestamp);
         assert!(result.is_ok());
 
         // Even 1 second later should fail
-        let result = validate_time_delay(&sanity_check, base_timestamp + 1);
+        let result = sanity_check.validate_freshness(base_timestamp + 1);
         assert!(result.is_err());
 
         // Very large max_time_delay (10 years in seconds)
@@ -1527,11 +839,11 @@ mod tests {
         };
 
         let current_timestamp = base_timestamp + (365 * 10 * SECONDS_PER_DAY);
-        let result = validate_time_delay(&sanity_check, current_timestamp);
+        let result = sanity_check.validate_freshness(current_timestamp);
         assert!(result.is_ok());
 
         let current_timestamp = base_timestamp + (365 * 10 * SECONDS_PER_DAY) + 1;
-        let result = validate_time_delay(&sanity_check, current_timestamp);
+        let result = sanity_check.validate_freshness(current_timestamp);
         assert!(result.is_err());
     }
 
@@ -1566,10 +878,10 @@ mod tests {
 
             if new_price > max_price {
                 prop_assert!(result.is_err());
-                prop_assert!(matches!(result, Err(OndoError::PriceExceedsMaxDeviation)));
+                prop_assert_eq!(result, Err(OndoError::PriceExceedsMaxDeviation.into()));
             } else if new_price < min_price {
                 prop_assert!(result.is_err());
-                prop_assert!(matches!(result, Err(OndoError::PriceBelowMinDeviation)));
+                prop_assert_eq!(result, Err(OndoError::PriceBelowMinDeviation.into()));
             } else {
                 prop_assert!(result.is_ok());
             }
@@ -1592,11 +904,11 @@ mod tests {
             };
 
             let current_timestamp = base_timestamp + seconds_elapsed;
-            let result = validate_time_delay(&sanity_check, current_timestamp);
+            let result = sanity_check.validate_freshness(current_timestamp);
 
             if seconds_elapsed > max_time_delay {
                 prop_assert!(result.is_err());
-                prop_assert!(matches!(result, Err(OndoError::MaxTimeDelayExceeded)));
+                prop_assert_eq!(result, Err(OndoError::MaxTimeDelayExceeded.into()));
             } else {
                 prop_assert!(result.is_ok());
             }

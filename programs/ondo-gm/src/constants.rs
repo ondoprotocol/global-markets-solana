@@ -1,13 +1,13 @@
 use anchor_lang::prelude::*;
 
 /// CHAIN IDS (Solana genesis hashes)
-/// Mainnet-beta genesis hash
+/// Mainnet-beta genesis hash (also used by the testnet feature for staging on mainnet)
 #[cfg(any(feature = "mainnet", feature = "testnet"))]
 pub const CHAIN_ID: Pubkey = pubkey!("5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d");
 /// Devnet genesis hash
 #[cfg(feature = "devnet")]
 pub const CHAIN_ID: Pubkey = pubkey!("EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG");
-/// Localnet genesis hash (uses devnet)
+/// Attestation chain ID for localnet builds (the devnet genesis hash)
 #[cfg(feature = "localnet")]
 pub const CHAIN_ID: Pubkey = pubkey!("EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG");
 /// Default genesis hash (devnet)
@@ -31,14 +31,18 @@ pub const SECONDS_PER_DAY: i64 = 86400; // 24 * 60 * 60
 
 /// Seed for the mint authority PDA
 pub const MINT_AUTHORITY_SEED: &[u8] = b"mint_authority";
+/// Seed for the portfolio mint authority PDA
+pub const PORTFOLIO_MINT_AUTHORITY_SEED: &[u8] = b"portfolio_mint_authority";
 /// Seed for OndoUser account PDA
 pub const ONDO_USER_SEED: &[u8] = b"OndoUser";
 /// Seed for TokenLimit account PDA
 pub const TOKEN_LIMIT_ACCOUNT_SEED: &[u8] = b"token";
 /// Seed for USDonManagerState PDA
 pub const USDON_MANAGER_STATE_SEED: &[u8] = b"usdon_manager";
-/// Seed for GmTokenManagerState PDA
+/// Seed for GMTokenManagerState PDA
 pub const GMTOKEN_MANAGER_STATE_SEED: &[u8] = b"gmtoken_manager";
+/// Seed for PortfolioTokenManager PDA
+pub const PORTFOLIO_TOKEN_MANAGER_STATE_SEED: &[u8] = b"portfolio_token_manager";
 /// Seed for Whitelist account PDA
 pub const WHITELIST_SEED: &[u8] = b"whitelist";
 /// Seed for oracle sanity check PDA
@@ -51,7 +55,7 @@ pub const USDC_PYTH_ID: &str = "eaa020c61cc479712813461ce153894a96a6c00b21ed0cfc
 pub const USDC_PYTH_ORACLE_ADDRESS: Pubkey =
     pubkey!("Dpw1EAVrSB1ibxiDQyTAW6Zip3J4Btk2x4SgApQCeFbX");
 
-/// Minimum price threshold for USDC (in scaled units)
+/// Minimum accepted USDC price: $0.98 at 8 decimals
 pub const MIN_PRICE: u64 = 98_000_000;
 pub const USDC_PRICE_DECIMALS: u8 = 8;
 pub const MAX_AGE_UPPER_BOUND: u64 = SECONDS_PER_DAY as u64;
@@ -59,7 +63,7 @@ pub const MAX_AGE_UPPER_BOUND: u64 = SECONDS_PER_DAY as u64;
 /// Maximum allowed price delay
 pub const MAX_SECONDS_EXPIRATION: i64 = 365 * SECONDS_PER_DAY;
 
-/// Default attestation expiration time in seconds
+/// Maximum remaining attestation lifetime in seconds; also the consumed-account retention period
 pub const MAX_ATTESTATION_EXPIRATION: i64 = 30;
 
 /// Default rate limit window in seconds (1 hour)
@@ -69,7 +73,7 @@ pub const BUY: u8 = 0x30;
 /// Sell side identifier for attestations
 pub const SELL: u8 = 0x31;
 
-/// Number of decimals for GM Token
+/// Number of decimals for factory-created GM, USDon, and portfolio mints
 pub const GM_TOKEN_DECIMALS: u8 = 9;
 
 // SCALING FACTORS
@@ -81,8 +85,8 @@ pub const BASIS_POINTS_DIVISOR: u64 = 10_000;
 
 pub const CONFIDENCE_THRESHOLD: u128 = 1;
 
-/// The maximum amount of tokens that can be minted in a single admin mint operation
-/// 10,000,000,000,000,000 units = 10 million tokens with 9 decimals
+/// Maximum USD notional for one direct GM/portfolio mint, scaled to 9 decimals ($10 million).
+/// Also caps direct USDon minting at 10 million USDon, valued at $1 each.
 pub const MAX_MINT_AMOUNT: u64 = 10_000_000_000_000_000;
 
 /// The maximum length for a token symbol

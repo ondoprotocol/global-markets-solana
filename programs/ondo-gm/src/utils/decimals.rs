@@ -7,6 +7,7 @@ use crate::errors::OndoError;
 /// * `amount` - The amount to normalize
 /// * `from_decimals` - The current decimal precision of the amount
 /// * `to_decimals` - The target decimal precision to normalize to
+/// * `round_up` - Round discarded fractional units up when reducing precision; otherwise floor
 /// # Returns
 /// * `Result<u64>` - The normalized amount
 #[inline(always)]
