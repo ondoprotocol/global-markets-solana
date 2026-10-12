@@ -29,7 +29,7 @@ pub struct RoleRevoked {
 /// Event emitted when a rate limit is set for a user
 /// Fields:
 /// - user: The public key of the user for whom the rate limit is set
-/// - limit: The rate limit value
+/// - limit: USD notional capacity per direction, scaled to 9 decimals
 #[event]
 pub struct RateLimitUserSet {
     pub user: Pubkey,
@@ -39,7 +39,7 @@ pub struct RateLimitUserSet {
 /// Event emitted when a rate limit is set for a token
 /// Fields:
 /// - token: The public key of the token for which the rate limit is set
-/// - limit: The rate limit value
+/// - limit: USD notional capacity per direction, scaled to 9 decimals
 /// - limit_window: The time window for the rate limit
 #[event]
 pub struct RateLimitTokenSet {
@@ -74,83 +74,94 @@ pub struct SanityCheckUpdated {
     pub max_time_delay: Option<i64>,
 }
 
-/// Event emitted when a GM Token is deployed
+/// Event emitted when a token is deployed
 /// Fields:
-/// - gm_token: The public key of the deployed GM Token
+/// - mint: The public key of the deployed token
+/// - kind: Token family: 0 for GM/USDon, 1 for portfolio
 #[event]
-pub struct GMTokenDeployed {
-    pub gm_token: Pubkey,
+pub struct TokenDeployed {
+    pub mint: Pubkey,
+    pub kind: u8,
 }
 
 /// Event emitted when the Token Factory is paused or unpaused
 /// Fields:
 /// - is_paused: Boolean indicating if the Token Factory is paused
 /// - pauser: The address of the operator who performed the pause/unpause action
+/// - kind: Token family: 0 for GM/USDon, 1 for portfolio
 #[event]
 pub struct TokenFactoryPaused {
     pub is_paused: bool,
     pub pauser: Pubkey,
+    pub kind: u8,
 }
 
-/// Event emitted when GM Token minting is globally paused or unpaused
+/// Event emitted when token minting is globally paused or unpaused
 /// Fields:
 /// - is_paused: Boolean indicating if the minting is globally paused
 /// - pauser: The address of the user who performed the pause/unpause action
+/// - kind: Token family: 0 for GM/USDon, 1 for portfolio
 #[event]
 pub struct TokenManagerMintingPaused {
     pub is_paused: bool,
     pub pauser: Pubkey,
+    pub kind: u8,
 }
 
-/// Event emitted when GM Token redemptions are globally paused or unpaused
+/// Event emitted when token redemptions are globally paused or unpaused
 /// Fields:
 /// - is_paused: Boolean indicating if redemptions are globally paused
 /// - pauser: The address of the operator who performed the pause/unpause action
+/// - kind: Token family: 0 for GM/USDon, 1 for portfolio
 #[event]
 pub struct TokenManagerRedemptionPaused {
     pub is_paused: bool,
     pub pauser: Pubkey,
+    pub kind: u8,
 }
 
-/// Event emitted when minting for a GM Token is paused or unpaused
+/// Event emitted when minting for a token is paused or unpaused
 /// Fields:
-/// - is_paused: Boolean indicating if minting/redemptions are paused
-/// - token: The address of the GM Token
+/// - is_paused: Boolean indicating if minting is paused
+/// - token: The mint address
 /// - pauser: The address of the operator who performed the pause/unpause action
 #[event]
-pub struct GMTokenMintingPaused {
+pub struct TokenMintingPaused {
     pub is_paused: bool,
     pub token: Pubkey,
     pub pauser: Pubkey,
 }
 
-/// Event emitted redemptions for a GM Token are paused or unpaused
+/// Event emitted when per-mint redemptions are paused or unpaused
 /// Fields:
 /// - is_paused: Boolean indicating if redemptions are paused
-/// - token: The address of the GM Token
+/// - token: The address of the token
 /// - pauser: The address of the operator who performed the pause/unpause action
 #[event]
-pub struct GMTokenRedemptionPaused {
+pub struct TokenRedemptionPaused {
     pub is_paused: bool,
     pub token: Pubkey,
     pub pauser: Pubkey,
 }
 
-/// Event emitted when a GM Token is paused/unpaused at the mint-level
+/// Event emitted when a Token is paused/unpaused at the mint-level
 /// Fields:
 /// - is_paused: Boolean indicating whether the token is paused
-/// - token: The address of the GM Token
+/// - token: The mint address
 /// - pauser: The address of the operator who performed the pause/unpaused action
+/// - kind: Token family: 0 for GM/USDon, 1 for portfolio
 #[event]
-pub struct GMTokenPaused {
+pub struct TokenPaused {
     pub is_paused: bool,
     pub token: Pubkey,
     pub pauser: Pubkey,
+    pub kind: u8,
 }
 
 /// Event emitted when a trade is executed
 /// Fields:
-/// - execution_id: The unique identifier of the trade execution
+/// - execution_id: Monotonically increasing ID within the GM or portfolio manager
+///   sequence; use the invoking instruction to identify the token family
 #[event]
 pub struct TradeExecuted {
     pub execution_id: u128,

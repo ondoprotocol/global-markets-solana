@@ -29,7 +29,7 @@ pub mod ondo_gm {
 
     /// Initialize the USDon manager state
     ///
-    /// Sets up the manager with the USDon mint, initial price, oracle configuration,
+    /// Sets up the manager with the USDon mint, USDC oracle guard configuration,
     /// and vault addresses for USDC and USDon tokens.
     /// Signer must have the GUARDIAN_USDON role
     pub fn initialize_usdon_manager(
@@ -49,7 +49,8 @@ pub mod ondo_gm {
     /// Initialize the GM token manager state
     ///
     /// Sets up the manager with pause states for factory, redemptions, and minting,
-    /// and configures the secp256k1 attestation signer address.
+    /// and configures the secp256k1 attestation signer address. The trading-hours
+    /// offset is retained for account compatibility; trading hours are not enforced.
     /// Signer must have the ADMIN_ROLE_GMTOKEN_MANAGER role
     pub fn initialize_gmtoken_manager(
         ctx: Context<InitializeGMTokenManager>,
@@ -69,14 +70,36 @@ pub mod ondo_gm {
         )
     }
 
-    /// Enable or disable oracle price for USDon
+    /// Initialize the Portfolio token manager state
+    ///
+    /// The Portfolio equivalent of `initialize_gmtoken_manager`. Portfolio tokens
+    /// have their own manager state, so their factory and global pause flags are
+    /// independent of the GM Token ones.
+    /// Signer must have the ADMIN_ROLE_PORTFOLIO_TOKEN_MANAGER role
+    pub fn initialize_portfolio_token_manager(
+        ctx: Context<InitializePortfolioTokenManager>,
+        factory_paused: bool,
+        redemption_paused: bool,
+        minting_paused: bool,
+        attestation_signer_secp: [u8; 20],
+    ) -> Result<()> {
+        ctx.accounts.initialize_portfolio_token_manager(
+            factory_paused,
+            redemption_paused,
+            minting_paused,
+            attestation_signer_secp,
+            &ctx.bumps,
+        )
+    }
+
+    /// Enable or disable the USDC oracle guard for GM and portfolio USDC trades
     /// Signer must have the ADMIN_ROLE_USDON_MANAGER role
     pub fn enable_oracle_price(ctx: Context<USDonManagerAdmin>, is_enabled: bool) -> Result<()> {
         ctx.accounts.enable_oracle_price(is_enabled)
     }
 
     /// Set the maximum age for oracle price data. When USDC oracle prices are more stale than `oracle_price_max_age`
-    /// swaps will halt.
+    /// USDC trades will halt if the oracle guard is enabled.
     /// Signer must have the ADMIN_ROLE_USDON_MANAGER role
     pub fn set_oracle_price_max_age(
         ctx: Context<USDonManagerAdmin>,
@@ -104,20 +127,16 @@ pub mod ondo_gm {
         ctx.accounts.retrieve_tokens(amount)
     }
 
-    /// Initialize a user account with optional rate limits
-    pub fn initialize_user(
-        ctx: Context<InitializeUser>,
-        rate_limit: Option<u64>,
-        limit_window: Option<u64>,
-    ) -> Result<()> {
-        ctx.accounts
-            .initialize_user(rate_limit, limit_window, &ctx.bumps)
+    /// Initialize a user account with the mint's default user limits
+    /// Signer must have the INITIALIZER_ROLE_ONDO_USER role
+    pub fn initialize_user(ctx: Context<InitializeUser>) -> Result<()> {
+        ctx.accounts.initialize_user(&ctx.bumps)
     }
 
     /// Initialize token-level rate limits
     ///
     /// Sets rate limits for the token and default limits for users trading this token.
-    /// Signer must have the DEPLOYER_ROLE_GMTOKEN_FACTORY role
+    /// Signer must have the DEPLOYER_ROLE_TOKEN_FACTORY role
     pub fn initialize_token_limit(
         ctx: Context<InitializeTokenLimit>,
         rate_limit: Option<u64>,
@@ -135,7 +154,7 @@ pub mod ondo_gm {
     }
 
     /// Update token-level rate limits
-    /// Signer must have the ADMIN_ROLE_GMTOKEN_MANAGER role
+    /// Signer must have the ADMIN_ROLE_TOKEN_LIMIT role
     pub fn set_token_limit(
         ctx: Context<SetTokenLimit>,
         rate_limit: Option<u64>,
@@ -154,7 +173,7 @@ pub mod ondo_gm {
     /// Initialize sanity check parameters for a token
     ///
     /// Sets up price deviation and time delay checks to ensure safe trading.
-    /// Signer must have the ADMIN_ROLE_ONDO_SANITY_CHECK role
+    /// Signer must have the DEPLOYER_ROLE_TOKEN_FACTORY role
     pub fn initialize_sanity_check(
         ctx: Context<InitializeSanityCheck>,
         last_price: u64,
@@ -179,8 +198,8 @@ pub mod ondo_gm {
         amount: u64,
         expiration: i64,
     ) -> Result<()> {
-        mint_with_attestation(
-            &mut ctx.accounts.into_token_manager(),
+        token_manager::mint_with_attestation(
+            &mut ctx.accounts.as_token_manager(),
             attestation_id,
             price,
             amount,
@@ -208,8 +227,8 @@ pub mod ondo_gm {
         amount: u64,
         expiration: i64,
     ) -> Result<()> {
-        mint_with_attestation(
-            &mut ctx.accounts.into_token_manager(),
+        token_manager::mint_with_attestation(
+            &mut ctx.accounts.as_token_manager(),
             attestation_id,
             price,
             amount,
@@ -237,8 +256,8 @@ pub mod ondo_gm {
         amount: u64,
         expiration: i64,
     ) -> Result<()> {
-        redeem_with_attestation(
-            &mut ctx.accounts.into_token_manager(),
+        token_manager::redeem_with_attestation(
+            &mut ctx.accounts.as_token_manager(),
             attestation_id,
             price,
             amount,
@@ -266,8 +285,8 @@ pub mod ondo_gm {
         amount: u64,
         expiration: i64,
     ) -> Result<()> {
-        redeem_with_attestation(
-            &mut ctx.accounts.into_token_manager(),
+        token_manager::redeem_with_attestation(
+            &mut ctx.accounts.as_token_manager(),
             attestation_id,
             price,
             amount,
@@ -283,6 +302,44 @@ pub mod ondo_gm {
         });
 
         Ok(())
+    }
+
+    /// Mint Portfolio tokens by paying with USDC
+    ///
+    /// Requires a valid attestation with price, amount, and expiration
+    pub fn mint_pt_with_attestation(
+        ctx: Context<PortfolioTokenManager>,
+        attestation_id: [u8; 16],
+        price: u64,
+        amount: u64,
+        expiration: i64,
+    ) -> Result<()> {
+        portfolio_token_manager::mint_with_attestation(
+            ctx,
+            attestation_id,
+            price,
+            amount,
+            expiration,
+        )
+    }
+
+    /// Redeem Portfolio tokens for USDC
+    ///
+    /// Requires a valid attestation with price, amount, and expiration
+    pub fn redeem_pt_with_attestation(
+        ctx: Context<PortfolioTokenManager>,
+        attestation_id: [u8; 16],
+        price: u64,
+        amount: u64,
+        expiration: i64,
+    ) -> Result<()> {
+        portfolio_token_manager::redeem_with_attestation(
+            ctx,
+            attestation_id,
+            price,
+            amount,
+            expiration,
+        )
     }
 
     /// Add an address to the whitelist
@@ -326,22 +383,31 @@ pub mod ondo_gm {
     }
 
     /// Mint USDon tokens (admin function)
-    /// Signer must have the MINTER_ROLE_USDON role
+    /// Signer must have the MINTER_ROLE_USDON or ADMIN_ROLE_USDON role
     pub fn mint_usdon(ctx: Context<USDonMinter>, amount: u64) -> Result<()> {
         ctx.accounts.mint_usdon(amount, ctx.bumps.mint_authority)
     }
 
     /// Burn USDon tokens (admin function)
-    /// Signer must have the BURNER_ROLE_USDON role
+    /// Signer must have the BURNER_ROLE_USDON or ADMIN_ROLE_USDON role
     pub fn burn_usdon(ctx: Context<USDonBurner>, amount: u64) -> Result<()> {
         ctx.accounts
             .burn_usdon(amount, ctx.bumps.permanent_delegate)
     }
 
     /// Mint GM tokens directly (admin function)
+    /// Requires unpaused minting and a fresh sanity-check price; capped at $10 million notional.
     /// Signer must have the MINTER_ROLE_GMTOKEN role
     pub fn mint_gm(ctx: Context<GMTokenMinter>, amount: u64) -> Result<()> {
         ctx.accounts.mint_gm(amount, ctx.bumps.mint_authority)
+    }
+
+    /// Mint Portfolio tokens directly (admin function)
+    /// Requires unpaused minting and a fresh sanity-check price; capped at $10 million notional.
+    /// Signer must have the MINTER_ROLE_PORTFOLIO_TOKEN role
+    pub fn mint_portfolio(ctx: Context<PortfolioTokenMinter>, amount: u64) -> Result<()> {
+        ctx.accounts
+            .mint_portfolio(amount, ctx.bumps.mint_authority)
     }
 
     /// Grants the specified GMToken role to the user
@@ -358,6 +424,23 @@ pub mod ondo_gm {
     /// Signer must have the ADMIN_ROLE_GMTOKEN role
     pub fn revoke_gmtoken_role(ctx: Context<GMTokenRevokeRole>) -> Result<()> {
         ctx.accounts.revoke_gmtoken_role()
+    }
+
+    /// Grants the specified PortfolioToken role to the user
+    /// Signer must have the ADMIN_ROLE_PORTFOLIO_TOKEN role
+    pub fn grant_portfolio_token_role(
+        ctx: Context<PortfolioTokenGrantRole>,
+        role: RoleType,
+        user: Pubkey,
+    ) -> Result<()> {
+        ctx.accounts
+            .grant_portfolio_token_role(role, user, &ctx.bumps)
+    }
+
+    /// Revokes the specified PortfolioToken role from the user
+    /// Signer must have the ADMIN_ROLE_PORTFOLIO_TOKEN role
+    pub fn revoke_portfolio_token_role(ctx: Context<PortfolioTokenRevokeRole>) -> Result<()> {
+        ctx.accounts.revoke_portfolio_token_role()
     }
 
     /// Grants the specified GM Token Factory role to the user
@@ -377,6 +460,41 @@ pub mod ondo_gm {
         ctx.accounts.revoke_gmtoken_factory_role()
     }
 
+    /// Grants the specified Portfolio Token Factory role to the user
+    /// Signer must have the ADMIN_ROLE_PORTFOLIO_TOKEN_FACTORY role
+    pub fn grant_portfolio_token_factory_role(
+        ctx: Context<PortfolioTokenFactoryGrantRole>,
+        role: RoleType,
+        user: Pubkey,
+    ) -> Result<()> {
+        ctx.accounts
+            .grant_portfolio_token_factory_role(role, user, &ctx.bumps)
+    }
+
+    /// Revokes the specified Portfolio Token Factory role from the user
+    /// Signer must have the ADMIN_ROLE_PORTFOLIO_TOKEN_FACTORY role
+    pub fn revoke_portfolio_token_factory_role(
+        ctx: Context<PortfolioTokenFactoryRevokeRole>,
+    ) -> Result<()> {
+        ctx.accounts.revoke_portfolio_token_factory_role()
+    }
+
+    /// Grants the specified Token Limit role to the user
+    /// Signer must have the ADMIN_ROLE_TOKEN_LIMIT role
+    pub fn grant_token_limit_role(
+        ctx: Context<TokenLimitGrantRole>,
+        role: RoleType,
+        user: Pubkey,
+    ) -> Result<()> {
+        ctx.accounts.grant_token_limit_role(role, user, &ctx.bumps)
+    }
+
+    /// Revokes the specified Token Limit role from the user
+    /// Signer must have the ADMIN_ROLE_TOKEN_LIMIT role
+    pub fn revoke_token_limit_role(ctx: Context<TokenLimitRevokeRole>) -> Result<()> {
+        ctx.accounts.revoke_token_limit_role()
+    }
+
     // All Pause Controls
     // --------------------------------------------------------------------------------
 
@@ -384,74 +502,152 @@ pub mod ondo_gm {
 
     /// Pause the GM token factory
     /// Signer must have the PAUSER_ROLE_GMTOKEN_FACTORY role
-    pub fn pause_token_factory(ctx: Context<GMTokenFactoryPauser>) -> Result<()> {
+    pub fn pause_gmtoken_factory(ctx: Context<GMTokenFactoryPauser>) -> Result<()> {
         ctx.accounts.pause_factory()
     }
 
     /// Pause the GM token factory (admin version)
     /// Signer must have the ADMIN_ROLE_GMTOKEN_FACTORY role
-    pub fn pause_token_factory_admin(ctx: Context<GMTokenFactoryAdmin>) -> Result<()> {
+    pub fn pause_gmtoken_factory_admin(ctx: Context<GMTokenFactoryAdmin>) -> Result<()> {
         ctx.accounts.pause_factory()
     }
 
     /// Resume the GM token factory
     /// Signer must have the ADMIN_ROLE_GMTOKEN_FACTORY role
-    pub fn resume_token_factory(ctx: Context<GMTokenFactoryAdmin>) -> Result<()> {
+    pub fn resume_gmtoken_factory(ctx: Context<GMTokenFactoryAdmin>) -> Result<()> {
         ctx.accounts.resume_factory()
     }
 
-    // Global Mint & Redeem - 1 permissioned pause, 1 permissioned resume
+    /// Pause the Portfolio token factory
+    /// Signer must have the PAUSER_ROLE_PORTFOLIO_TOKEN_FACTORY role
+    pub fn pause_portfolio_token_factory(ctx: Context<PortfolioTokenFactoryPauser>) -> Result<()> {
+        ctx.accounts.pause_factory()
+    }
 
-    /// Pause all transfers for a GM token by invoking the pausable token extension
+    /// Pause the Portfolio token factory (admin version)
+    /// Signer must have the ADMIN_ROLE_PORTFOLIO_TOKEN_FACTORY role
+    pub fn pause_portfolio_token_factory_admin(
+        ctx: Context<PortfolioTokenFactoryAdmin>,
+    ) -> Result<()> {
+        ctx.accounts.pause_factory()
+    }
+
+    /// Resume the Portfolio token factory
+    /// Signer must have the ADMIN_ROLE_PORTFOLIO_TOKEN_FACTORY role
+    pub fn resume_portfolio_token_factory(ctx: Context<PortfolioTokenFactoryAdmin>) -> Result<()> {
+        ctx.accounts.resume_factory()
+    }
+
+    // Token-2022 Pausable extension (per mint) - 1 permissioned pause, 1 permissioned resume
+
+    /// Pause minting, burning, and transfers for a GM token via Token-2022's Pausable extension
     /// Signer must have the PAUSER_ROLE_GMTOKEN role
-    pub fn pause_token(ctx: Context<PauseGMToken>) -> Result<()> {
+    pub fn pause_gmtoken(ctx: Context<PauseGMToken>) -> Result<()> {
         ctx.accounts.pause(ctx.bumps.mint_authority)
     }
 
-    /// Resume all transfers for a GM token by invoking the pausable token extension to remove a pause.
+    /// Clear a GM token's Token-2022 pause on minting, burning, and transfers
     /// Signer must have the UNPAUSER_ROLE_GMTOKEN role
-    pub fn resume_token(ctx: Context<ResumeGMToken>) -> Result<()> {
+    pub fn resume_gmtoken(ctx: Context<ResumeGMToken>) -> Result<()> {
+        ctx.accounts.resume(ctx.bumps.mint_authority)
+    }
+
+    /// Pause minting, burning, and transfers for a Portfolio token via Token-2022's Pausable extension
+    /// Signer must have the PAUSER_ROLE_PORTFOLIO_TOKEN role
+    pub fn pause_portfolio_token(ctx: Context<PausePortfolioToken>) -> Result<()> {
+        ctx.accounts.pause(ctx.bumps.mint_authority)
+    }
+
+    /// Clear a Portfolio token's Token-2022 pause on minting, burning, and transfers
+    /// Signer must have the UNPAUSER_ROLE_PORTFOLIO_TOKEN role
+    pub fn resume_portfolio_token(ctx: Context<ResumePortfolioToken>) -> Result<()> {
         ctx.accounts.resume(ctx.bumps.mint_authority)
     }
 
     // Global Mint - 1 permissioned pause, 2 admin pause/resume
 
-    /// Pause all mints globally
+    /// Pause GM mints globally
     /// Signer must have the PAUSER_ROLE_GMTOKEN_MANAGER role
-    pub fn pause_global_minting(ctx: Context<GMTokenManagerGlobalPauser>) -> Result<()> {
+    pub fn pause_global_gm_minting(ctx: Context<GMTokenManagerGlobalPauser>) -> Result<()> {
         ctx.accounts.pause_global_minting()
     }
 
-    /// Resume all mints globally
+    /// Resume GM mints globally
     /// Signer must have the ADMIN_ROLE_GMTOKEN_MANAGER role
-    pub fn resume_global_minting(ctx: Context<GMTokenManagerAdminGlobalPauser>) -> Result<()> {
+    pub fn resume_global_gm_minting(ctx: Context<GMTokenManagerAdminPauser>) -> Result<()> {
         ctx.accounts.resume_global_minting()
     }
 
-    /// Pause minting globally (admin function)
+    /// Pause GM minting globally (admin function)
     /// Signer must have the ADMIN_ROLE_GMTOKEN_MANAGER role
-    pub fn pause_global_minting_admin(ctx: Context<GMTokenManagerAdminGlobalPauser>) -> Result<()> {
+    pub fn pause_global_gm_minting_admin(ctx: Context<GMTokenManagerAdminPauser>) -> Result<()> {
+        ctx.accounts.pause_global_minting()
+    }
+
+    /// Pause Portfolio minting globally
+    /// Signer must have the PAUSER_ROLE_PORTFOLIO_TOKEN_MANAGER role
+    pub fn pause_portfolio_global_minting(
+        ctx: Context<PortfolioTokenManagerGlobalPauser>,
+    ) -> Result<()> {
+        ctx.accounts.pause_global_minting()
+    }
+
+    /// Resume Portfolio minting globally
+    /// Signer must have the ADMIN_ROLE_PORTFOLIO_TOKEN_MANAGER role
+    pub fn resume_portfolio_global_minting(
+        ctx: Context<PortfolioTokenManagerAdminPauser>,
+    ) -> Result<()> {
+        ctx.accounts.resume_global_minting()
+    }
+
+    /// Pause Portfolio minting globally (admin function)
+    /// Signer must have the ADMIN_ROLE_PORTFOLIO_TOKEN_MANAGER role
+    pub fn pause_portfolio_global_minting_admin(
+        ctx: Context<PortfolioTokenManagerAdminPauser>,
+    ) -> Result<()> {
         ctx.accounts.pause_global_minting()
     }
 
     // Global Redeem - 1 permissioned pause, 2 admin pause/resume
 
-    /// Pause all redemption globally
+    /// Pause GM redemption globally
     /// Signer must have the PAUSER_ROLE_GMTOKEN_MANAGER role
-    pub fn pause_global_redemption(ctx: Context<GMTokenManagerGlobalPauser>) -> Result<()> {
+    pub fn pause_global_gm_redemption(ctx: Context<GMTokenManagerGlobalPauser>) -> Result<()> {
         ctx.accounts.pause_global_redemption()
     }
 
-    /// Resume all redemption globally
+    /// Resume GM redemption globally
     /// Signer must have the ADMIN_ROLE_GMTOKEN_MANAGER role
-    pub fn resume_global_redemption(ctx: Context<GMTokenManagerAdminGlobalPauser>) -> Result<()> {
+    pub fn resume_global_gm_redemption(ctx: Context<GMTokenManagerAdminPauser>) -> Result<()> {
         ctx.accounts.resume_global_redemption()
     }
 
-    /// Pause redemption globally (admin function)
+    /// Pause GM redemption globally (admin function)
     /// Signer must have the ADMIN_ROLE_GMTOKEN_MANAGER role
-    pub fn pause_global_redemption_admin(
-        ctx: Context<GMTokenManagerAdminGlobalPauser>,
+    pub fn pause_global_gm_redemption_admin(ctx: Context<GMTokenManagerAdminPauser>) -> Result<()> {
+        ctx.accounts.pause_global_redemption()
+    }
+
+    /// Pause Portfolio redemption globally
+    /// Signer must have the PAUSER_ROLE_PORTFOLIO_TOKEN_MANAGER role
+    pub fn pause_portfolio_global_redemption(
+        ctx: Context<PortfolioTokenManagerGlobalPauser>,
+    ) -> Result<()> {
+        ctx.accounts.pause_global_redemption()
+    }
+
+    /// Resume Portfolio redemption globally
+    /// Signer must have the ADMIN_ROLE_PORTFOLIO_TOKEN_MANAGER role
+    pub fn resume_portfolio_global_redemption(
+        ctx: Context<PortfolioTokenManagerAdminPauser>,
+    ) -> Result<()> {
+        ctx.accounts.resume_global_redemption()
+    }
+
+    /// Pause Portfolio redemption globally (admin function)
+    /// Signer must have the ADMIN_ROLE_PORTFOLIO_TOKEN_MANAGER role
+    pub fn pause_portfolio_global_redemption_admin(
+        ctx: Context<PortfolioTokenManagerAdminPauser>,
     ) -> Result<()> {
         ctx.accounts.pause_global_redemption()
     }
@@ -459,52 +655,50 @@ pub mod ondo_gm {
     // Token Redemption - 1 permissioned pause, 2 admin pause/resume
 
     /// Pause redemptions for a specific token
-    /// Signer must have the PAUSER_ROLE_GMTOKEN_MANAGER role
-    pub fn pause_token_redemption(ctx: Context<GMTokenManagerTokenPauser>) -> Result<()> {
-        ctx.accounts.pause_gmtoken_redemption()
+    /// Signer must have the PAUSER_ROLE_TOKEN_LIMIT role
+    pub fn pause_token_redemption(ctx: Context<TokenLimitPauser>) -> Result<()> {
+        ctx.accounts.pause_token_redemption()
     }
 
     /// Resume redemptions for a token (admin function)
-    /// Signer must have the ADMIN_ROLE_GMTOKEN_MANAGER role
-    pub fn resume_token_redemption(ctx: Context<GMTokenManagerAdminTokenPauser>) -> Result<()> {
-        ctx.accounts.resume_gmtoken_redemption()
+    /// Signer must have the ADMIN_ROLE_TOKEN_LIMIT role
+    pub fn resume_token_redemption(ctx: Context<TokenLimitAdminPauser>) -> Result<()> {
+        ctx.accounts.resume_token_redemption()
     }
 
     /// Pause redemptions for a specific token (admin function)
-    /// Signer must have the ADMIN_ROLE_GMTOKEN_MANAGER role
-    pub fn pause_token_redemption_admin(
-        ctx: Context<GMTokenManagerAdminTokenPauser>,
-    ) -> Result<()> {
-        ctx.accounts.pause_gmtoken_redemption()
+    /// Signer must have the ADMIN_ROLE_TOKEN_LIMIT role
+    pub fn pause_token_redemption_admin(ctx: Context<TokenLimitAdminPauser>) -> Result<()> {
+        ctx.accounts.pause_token_redemption()
     }
 
     // Token Minting - 1 permissioned pause, 2 admin pause/resume
 
     /// Pause minting for a specific token
-    /// Signer must have the PAUSER_ROLE_GMTOKEN_MANAGER role
-    pub fn pause_token_minting(ctx: Context<GMTokenManagerTokenPauser>) -> Result<()> {
-        ctx.accounts.pause_gmtoken_minting()
+    /// Signer must have the PAUSER_ROLE_TOKEN_LIMIT role
+    pub fn pause_token_minting(ctx: Context<TokenLimitPauser>) -> Result<()> {
+        ctx.accounts.pause_token_minting()
     }
 
     /// Resume mints for a token (admin function)
-    /// Signer must have the ADMIN_ROLE_GMTOKEN_MANAGER role
-    pub fn resume_token_minting(ctx: Context<GMTokenManagerAdminTokenPauser>) -> Result<()> {
-        ctx.accounts.resume_gmtoken_minting()
+    /// Signer must have the ADMIN_ROLE_TOKEN_LIMIT role
+    pub fn resume_token_minting(ctx: Context<TokenLimitAdminPauser>) -> Result<()> {
+        ctx.accounts.resume_token_minting()
     }
 
-    /// Pause mints for a specific token (admin function)
-    /// Signer must have the ADMIN_ROLE_GMTOKEN_MANAGER role
-    pub fn pause_token_minting_admin(ctx: Context<GMTokenManagerAdminTokenPauser>) -> Result<()> {
-        ctx.accounts.pause_gmtoken_minting()
+    /// Pause minting for a specific token (admin function)
+    /// Signer must have the ADMIN_ROLE_TOKEN_LIMIT role
+    pub fn pause_token_minting_admin(ctx: Context<TokenLimitAdminPauser>) -> Result<()> {
+        ctx.accounts.pause_token_minting()
     }
 
     // End Pause Controls
     // --------------------------------------------------------------------------------
 
     /// Set rate limit for a user
-    /// Signer must have the ADMIN_ROLE_GMTOKEN_MANAGER role
+    /// Signer must have the ADMIN_ROLE_USER_LIMIT role
     pub fn set_ondo_user_limits(
-        ctx: Context<GMTokenManagerAdminSetUserLimits>,
+        ctx: Context<SetUserLimits>,
         rate_limit: u64,
         limit_window: u64,
     ) -> Result<()> {
@@ -519,7 +713,7 @@ pub mod ondo_gm {
 
     // For GM tokens (no permanent delegate)
     /// Initialize a new GM token mint (without permanent delegate)
-    /// Signer must have the DEPLOYER_ROLE_GMTOKEN_FACTORY role
+    /// Signer must have the DEPLOYER_ROLE_TOKEN_FACTORY role
     pub fn init_mint(
         ctx: Context<TokenFactory>,
         name: String,
@@ -528,13 +722,12 @@ pub mod ondo_gm {
         freeze_authority: Pubkey,
     ) -> Result<()> {
         ctx.accounts
-            .init_mint(name, symbol, uri, freeze_authority, &ctx.bumps)?;
-        Ok(())
+            .init_mint(name, symbol, uri, freeze_authority, &ctx.bumps)
     }
 
     // For USDon (with permanent delegate)
     /// Initialize a new token mint with permanent delegate (for USDon)
-    /// Signer must have the DEPLOYER_ROLE_GMTOKEN_FACTORY role
+    /// Signer must have the DEPLOYER_ROLE_TOKEN_FACTORY role
     pub fn init_mint_delegate(
         ctx: Context<TokenFactoryDelegate>,
         name: String,
@@ -543,14 +736,37 @@ pub mod ondo_gm {
         freeze_authority: Pubkey,
     ) -> Result<()> {
         ctx.accounts
-            .init_mint_delegate(name, symbol, uri, freeze_authority, &ctx.bumps)?;
-        Ok(())
+            .init_mint_delegate(name, symbol, uri, freeze_authority, &ctx.bumps)
+    }
+
+    // For Portfolio tokens (no permanent delegate)
+    /// Initialize a new Portfolio token mint
+    /// Signer must have the DEPLOYER_ROLE_TOKEN_FACTORY role
+    pub fn init_portfolio_mint(
+        ctx: Context<PortfolioTokenFactory>,
+        name: String,
+        symbol: String,
+        uri: String,
+        freeze_authority: Pubkey,
+    ) -> Result<()> {
+        ctx.accounts
+            .init_mint(name, symbol, uri, freeze_authority, &ctx.bumps)
     }
 
     /// Update the secp256k1 attestation signer address
     /// Signer must have the ADMIN_ROLE_GMTOKEN_MANAGER role
     pub fn set_attestation_signer_secp(
-        ctx: Context<GMTokenManagerAdminGlobalPauser>,
+        ctx: Context<GMTokenManagerSetSigner>,
+        attestation_signer_secp: [u8; 20],
+    ) -> Result<()> {
+        ctx.accounts
+            .set_attestation_signer_secp(attestation_signer_secp)
+    }
+
+    /// Update the secp256k1 attestation signer address for Portfolio tokens
+    /// Signer must have the ADMIN_ROLE_PORTFOLIO_TOKEN_MANAGER role
+    pub fn set_portfolio_attestation_signer_secp(
+        ctx: Context<PortfolioTokenManagerSetSigner>,
         attestation_signer_secp: [u8; 20],
     ) -> Result<()> {
         ctx.accounts
@@ -565,13 +781,32 @@ pub mod ondo_gm {
         user: Pubkey,
     ) -> Result<()> {
         ctx.accounts
-            .add_gmtoken_manager_role(role, user, &ctx.bumps)
+            .grant_gmtoken_manager_role(role, user, &ctx.bumps)
     }
 
     /// Revoke a role from the GM token manager
     /// Signer must have the ADMIN_ROLE_GMTOKEN_MANAGER role
     pub fn revoke_gmtoken_manager_role(ctx: Context<GMTokenManagerRevokeRole>) -> Result<()> {
         ctx.accounts.revoke_gmtoken_manager_role()
+    }
+
+    /// Grant a Portfolio Token Manager role
+    /// Signer must have the ADMIN_ROLE_PORTFOLIO_TOKEN_MANAGER role
+    pub fn grant_portfolio_token_manager_role(
+        ctx: Context<PortfolioTokenManagerGrantRole>,
+        role: RoleType,
+        user: Pubkey,
+    ) -> Result<()> {
+        ctx.accounts
+            .grant_portfolio_token_manager_role(role, user, &ctx.bumps)
+    }
+
+    /// Revoke a role from the Portfolio token manager
+    /// Signer must have the ADMIN_ROLE_PORTFOLIO_TOKEN_MANAGER role
+    pub fn revoke_portfolio_token_manager_role(
+        ctx: Context<PortfolioTokenManagerRevokeRole>,
+    ) -> Result<()> {
+        ctx.accounts.revoke_portfolio_token_manager_role()
     }
 
     /// Grant a setter role for sanity check
@@ -630,7 +865,7 @@ pub mod ondo_gm {
             .set_allowed_deviation_bps(allowed_deviation_bps)
     }
 
-    /// Update the UI multiplier for token display
+    /// Update a GM token's UI multiplier for token display
     /// Signer must have the UPDATE_MULTIPLIER_ROLE role
     pub fn update_scaled_ui_multiplier(
         ctx: Context<UpdateScaledUiMultiplier>,
@@ -644,10 +879,22 @@ pub mod ondo_gm {
         )
     }
 
-    /// Update a token's metadata (name, symbol, URI)
+    /// Update a GM token's or USDon's metadata (name, symbol, URI)
     /// Signer must have the UPDATE_METADATA_ROLE role
     pub fn update_token_metadata(
-        ctx: Context<UpdateTokenMetadata>,
+        ctx: Context<UpdateGMTokenMetadata>,
+        new_name: Option<String>,
+        new_symbol: Option<String>,
+        new_uri: Option<String>,
+    ) -> Result<()> {
+        ctx.accounts
+            .update_token_metadata(new_name, new_symbol, new_uri, ctx.bumps)
+    }
+
+    /// Update a Portfolio token's metadata (name, symbol, URI)
+    /// Signer must have the UPDATE_METADATA_ROLE role
+    pub fn update_portfolio_token_metadata(
+        ctx: Context<UpdatePortfolioTokenMetadata>,
         new_name: Option<String>,
         new_symbol: Option<String>,
         new_uri: Option<String>,

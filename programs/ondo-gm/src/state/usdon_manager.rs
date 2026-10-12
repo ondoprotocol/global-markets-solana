@@ -10,7 +10,7 @@ pub struct USDonManagerState {
     // The USDon mint address
     pub usdon_mint: Pubkey,
 
-    // Whether oracle pricing is enabled for USDon operations
+    // Whether the USDC price/freshness/confidence guard is enabled for USDC trades
     pub oracle_price_enabled: bool,
 
     // The length of time (in seconds) that an oracle price is considered valid
@@ -22,7 +22,7 @@ pub struct USDonManagerState {
     // The USDC vault address used for backing USDon
     pub usdc_vault: Pubkey,
 
-    // The USDon vault address used for backing USDon
+    // The USDon settlement vault; receives USDon payments and supplies USDon burned on USDC buys
     pub usdon_vault: Pubkey,
 
     // The bump used to derive the PDA for this account

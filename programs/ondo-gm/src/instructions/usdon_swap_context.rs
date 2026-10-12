@@ -12,6 +12,7 @@ use crate::{
         ORACLE_SANITY_CHECK_SEED, TOKEN_LIMIT_ACCOUNT_SEED, USDON_MANAGER_STATE_SEED,
         WHITELIST_SEED,
     },
+    errors::OndoError,
     state::{GMTokenManagerState, OndoUser, OracleSanityCheck, TokenLimit, USDonManagerState},
 };
 
@@ -27,15 +28,15 @@ pub struct USDonSwapContext<'info> {
     #[account(
         mut,
         mint::authority = mint_authority,
-        mint::token_program = token_program
+        mint::token_program = token_program,
+        constraint = mint.key() != usdon_manager_state.usdon_mint @ OndoError::InvalidInputMint,
     )]
     pub mint: Box<InterfaceAccount<'info, Mint>>,
 
     /// The mint authority PDA
     /// # PDA Seeds
     /// - MINT_AUTHORITY_SEED
-    /// CHECK: This account is used to verify the mint authority.
-    /// Does not need to be checked for correctness as it is uninitialized.
+    /// CHECK: The seeds constraint validates this authority PDA; no account data is read.
     #[account(
         seeds = [MINT_AUTHORITY_SEED],
         bump,
@@ -67,7 +68,7 @@ pub struct USDonSwapContext<'info> {
     )]
     pub token_limit_account: Box<Account<'info, TokenLimit>>,
 
-    /// The OracleSanityCheck account validating oracle price updates
+    /// The reference price, deviation band, and freshness bound checked against the quote
     /// # PDA Seeds
     /// - ORACLE_SANITY_CHECK_SEED
     /// - Mint address
@@ -153,7 +154,7 @@ pub struct USDonSwapContext<'info> {
     )]
     pub usdon_manager_state: Box<Account<'info, USDonManagerState>>,
 
-    /// The GmTokenManagerState account managing GM Token operations
+    /// The GMTokenManagerState account managing GM Token operations
     /// - Stores protocol parameters like factory, redemption, and minting paused.
     /// # PDA Seeds
     /// - GMTOKEN_MANAGER_STATE_SEED
@@ -177,8 +178,7 @@ impl<'info> USDonSwapContext<'info> {
     /// # Safety
     /// This method uses &mut self to provide mutable references to the accounts,
     /// ensuring that the TokenManager can perform necessary operations safely.
-    #[allow(clippy::wrong_self_convention)]
-    pub fn into_token_manager(&mut self) -> TokenManager<'_, 'info> {
+    pub fn as_token_manager(&mut self) -> TokenManager<'_, 'info> {
         TokenManager {
             user: &mut self.user,
             mint: &mut self.mint,
@@ -190,8 +190,6 @@ impl<'info> USDonSwapContext<'info> {
             attestation_id_account: &mut self.attestation_id_account,
             whitelist: &self.whitelist,
             token_program: &self.token_program,
-            system_program: &self.system_program,
-            associated_token_program: &self.associated_token_program,
             spl_token_program: None,
             usdc_price_update: None,
             usdc_vault: None,

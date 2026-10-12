@@ -29,8 +29,7 @@ pub struct InitializeUSDonManager<'info> {
     /// # PDA Seeds
     /// - MINT_AUTHORITY_SEED
     ///
-    /// CHECK: This account is used to verify the mint authority.
-    /// Does not need to be checked for correctness as it is uninitialized.
+    /// CHECK: The seeds constraint validates this authority PDA; no account data is read.
     #[account(
         seeds = [MINT_AUTHORITY_SEED],
         bump,
@@ -66,7 +65,7 @@ pub struct InitializeUSDonManager<'info> {
     pub usdc_vault: InterfaceAccount<'info, TokenAccount>,
 
     /// The USDC vault token account
-    /// Used for non-mainnet deployments where USDC mint may differ
+    /// Used for localnet/devnet builds, which do not pin a USDC mint address
     #[cfg(not(any(feature = "mainnet", feature = "testnet")))]
     pub usdc_vault: InterfaceAccount<'info, TokenAccount>,
 
@@ -99,11 +98,9 @@ pub struct InitializeUSDonManager<'info> {
 impl<'info> InitializeUSDonManager<'info> {
     /// Initialize the USDon Manager state
     /// # Arguments
-    /// * `usdon_mint` - The public key of the USDon mint
-    /// * `usdon_price` - The initial USDon price (must be between MIN_USDON_PRICE and MAX_USDON_PRICE)
-    /// * `oracle_price_enabled` - Whether to enable oracle price feeds
-    /// * `usdc_vault` - The public key of the USDC vault
-    /// * `usdon_vault` - The public key of the USDon vault
+    /// * `oracle_price_enabled` - Whether to enable the USDC oracle guard
+    /// * `oracle_price_max_age` - Maximum USDC observation age in seconds (1 to 86400)
+    /// * `usdc_price_update_address` - The USDC oracle account address (must be nonzero)
     /// * `bumps` - The PDA bumps for account derivation
     /// # Returns
     /// * `Result<()>` - Ok if the USDonManagerState is successfully initialized, Err otherwise
@@ -149,7 +146,7 @@ impl<'info> InitializeUSDonManager<'info> {
 
 /// Admin operations for the USDon Manager
 /// Requires `ADMIN_ROLE_USDON_MANAGER` role
-/// Allows enabling/disabling oracle price, setting USDC and USDon vaults, and setting USDon price
+/// Configures the USDC oracle guard, its maximum observation age, and its price-update address
 #[derive(Accounts)]
 pub struct USDonManagerAdmin<'info> {
     /// The account with the authority to execute the operation
@@ -177,9 +174,9 @@ pub struct USDonManagerAdmin<'info> {
 }
 
 impl<'info> USDonManagerAdmin<'info> {
-    /// Enable or disable oracle price
+    /// Enable or disable the USDC oracle guard for GM and portfolio USDC trades
     /// # Arguments
-    /// * `is_enabled` - Whether oracle price should be enabled (true) or disabled (false)
+    /// * `is_enabled` - Whether to enforce the USDC oracle guard
     /// # Returns
     /// * `Result<()>` - Ok if the oracle price state is successfully set, Err otherwise
     pub fn enable_oracle_price(&mut self, is_enabled: bool) -> Result<()> {

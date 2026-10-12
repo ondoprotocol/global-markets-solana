@@ -9,7 +9,7 @@ pub struct GMTokenManagerState {
     // Monotonically increasing execution ID for mint/redeem operations
     pub execution_id: Option<u128>,
 
-    // True if the token factory is paused - prevents new GM Tokens from being created
+    // True if the GM factory is paused - prevents new GM and USDon mints from being created
     pub factory_paused: bool,
 
     // True if redemption is paused
@@ -27,8 +27,8 @@ pub struct GMTokenManagerState {
     /// All zeros ([0u8; 20]) means not set
     pub attestation_signer_secp: [u8; 20],
 
-    /// Trading hours offset from UTC in seconds
-    /// Positive values are east of UTC, negative values are west of UTC
+    /// Legacy trading-hours offset from UTC in seconds, retained for account compatibility.
+    /// Set at initialization; no trading-hours check uses this field.
     pub trading_hours_offset: i64,
 }
 

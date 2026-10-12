@@ -54,7 +54,8 @@ pub struct USDonGrantRole<'info> {
 impl<'info> USDonGrantRole<'info> {
     /// Initialize a USDon role for a user
     /// # Arguments
-    /// * `role` - The role to grant (must be MinterRoleUsdon, PauserRoleUsdon, or BurnerRoleUsdon)
+    /// * `role` - The role to grant (`MinterRoleUSDon` or `BurnerRoleUSDon`)
+    /// * `user` - The public key of the role recipient
     /// * `bumps` - The PDA bumps for account derivation
     /// # Returns
     /// * `Result<()>` - Ok if the role is successfully granted, Err otherwise
@@ -64,7 +65,7 @@ impl<'info> USDonGrantRole<'info> {
         user: Pubkey,
         bumps: &USDonGrantRoleBumps,
     ) -> Result<()> {
-        // Only allow `MinterRoleUsdon` and `BurnerRoleUsdon` roles to be created
+        // Only allow `MinterRoleUSDon` and `BurnerRoleUSDon` roles to be created
         require!(
             matches!(role, RoleType::MinterRoleUSDon | RoleType::BurnerRoleUSDon),
             OndoError::InvalidRoleType
@@ -130,7 +131,7 @@ impl<'info> USDonRevokeRole<'info> {
     /// # Returns
     /// * `Result<()>` - Ok if the role is successfully revoked, Err otherwise
     pub fn revoke_usdon_role(&mut self) -> Result<()> {
-        // Validate that the role being revoked is `MinterRoleUsdon` or `BurnerRoleUsdon`
+        // Validate that the role being revoked is `MinterRoleUSDon` or `BurnerRoleUSDon`
         require!(
             matches!(
                 self.role_to_revoke.role,
@@ -162,7 +163,7 @@ pub struct USDonMinter<'info> {
     /// # PDA Seeds
     /// - MINT_AUTHORITY_SEED
     ///
-    /// CHECK: This account is used to verify the mint authority, but does not need to be checked for correctness as it is uninitialized.
+    /// CHECK: The seeds constraint validates this authority PDA; no account data is read.
     #[account(
         seeds = [MINT_AUTHORITY_SEED],
         bump
@@ -258,7 +259,7 @@ pub struct USDonBurner<'info> {
     /// # PDA Seeds
     /// - MINT_AUTHORITY_SEED
     ///
-    /// CHECK: This account is used to verify the mint authority, but does not need to be checked for correctness as it is uninitialized.
+    /// CHECK: The seeds constraint validates this authority PDA; no account data is read.
     #[account(
         seeds = [MINT_AUTHORITY_SEED],
         bump

@@ -9,7 +9,7 @@ use crate::{
 };
 
 /// Initialize an OracleSanityCheck state account for a given mint
-/// Requires ADMIN_ROLE_ONDO_SANITY_CHECK role
+/// Requires DEPLOYER_ROLE_TOKEN_FACTORY role
 #[derive(Accounts)]
 pub struct InitializeSanityCheck<'info> {
     /// Pays for account creation
@@ -22,7 +22,7 @@ pub struct InitializeSanityCheck<'info> {
     /// The sanity check account to be initialized
     /// # PDA Seeds
     /// - `ORACLE_SANITY_CHECK_SEED`
-    /// - `mint` (the mint address of the GM Token for which the sanity check is being initialized)
+    /// - `mint` (the mint address for which the sanity check is being initialized)
     #[account(
         init,
         payer = payer,
@@ -32,17 +32,17 @@ pub struct InitializeSanityCheck<'info> {
     )]
     pub sanity_check: Account<'info, OracleSanityCheck>,
 
-    /// The Roles account verifying the authority has the `ADMIN_ROLE_ONDO_SANITY_CHECK` role
+    /// The Roles account verifying the authority has the `DEPLOYER_ROLE_TOKEN_FACTORY` role
     /// # PDA Seeds
-    /// - `RoleType::ADMIN_ROLE_ONDO_SANITY_CHECK`
+    /// - `RoleType::DEPLOYER_ROLE_TOKEN_FACTORY`
     /// - `authority` (the authority's address)
     #[account(
-        seeds = [RoleType::ADMIN_ROLE_ONDO_SANITY_CHECK, authority.key().as_ref()],
+        seeds = [RoleType::DEPLOYER_ROLE_TOKEN_FACTORY, authority.key().as_ref()],
         bump = authority_role_account.bump,
     )]
     pub authority_role_account: Account<'info, Roles>,
 
-    /// The GM Token mint for which the sanity check is being initialized
+    /// The token mint for which the sanity check is being initialized
     pub mint: InterfaceAccount<'info, Mint>,
 
     /// The system program
@@ -52,7 +52,7 @@ pub struct InitializeSanityCheck<'info> {
 impl<'info> InitializeSanityCheck<'info> {
     /// Initializes the sanity check parameters
     /// # Arguments
-    /// - `last_price`: The last known price of the GM Token
+    /// - `last_price`: The reference USD price per whole token, scaled to 9 decimals
     /// - `allowed_deviation_bps`: The allowed percentage deviation in basis points
     /// - `max_time_delay`: The maximum time delay for price validity in seconds
     /// - `bumps`: Bumps for PDA derivation
@@ -67,13 +67,14 @@ impl<'info> InitializeSanityCheck<'info> {
     ) -> Result<()> {
         // Validate allowed deviation
         require!(
-            allowed_deviation_bps <= BASIS_POINTS_DIVISOR, // 100% in basis points, to be adjusted
+            allowed_deviation_bps <= BASIS_POINTS_DIVISOR, // 100% in basis points
             OndoError::InvalidPercentage
         );
 
-        // Validate price delay
+        // Require an observation lifetime between 1 second and 1 year.
+        // Trading and direct minting reject references older than this delay.
         require!(
-            max_time_delay <= MAX_SECONDS_EXPIRATION, // 1 year lifetime in days, to be adjusted
+            (1..=MAX_SECONDS_EXPIRATION).contains(&max_time_delay),
             OndoError::InvalidMaxTimeDelay
         );
 
@@ -257,7 +258,7 @@ pub struct SetSanityCheck<'info> {
     )]
     pub authority_role_account: Account<'info, Roles>,
 
-    /// The GM Token mint
+    /// The token mint
     pub mint: Box<InterfaceAccount<'info, Mint>>,
 
     /// The `OracleSanityCheck` account to be updated
@@ -455,7 +456,7 @@ pub struct ConfigSanityCheck<'info> {
     )]
     pub authority_role_account: Account<'info, Roles>,
 
-    /// The GM Token mint
+    /// The token mint
     pub mint: Box<InterfaceAccount<'info, Mint>>,
 
     /// The OracleSanityCheck account to be configured
@@ -499,13 +500,13 @@ impl<'info> ConfigSanityCheck<'info> {
 
     /// Set the maximum time delay for price validity
     /// # Arguments
-    /// * `max_time_delay` - The maximum time delay in seconds (max 1 year)
+    /// * `max_time_delay` - The maximum time delay in seconds (1 second to 1 year)
     /// # Returns
     /// * `Result<()>` - Ok if the time delay is successfully set, Err otherwise
     pub fn set_max_time_delay(&mut self, max_time_delay: i64) -> Result<()> {
         // Validate max time delay
         require!(
-            max_time_delay <= MAX_SECONDS_EXPIRATION,
+            (1..=MAX_SECONDS_EXPIRATION).contains(&max_time_delay),
             OndoError::InvalidMaxTimeDelay
         );
 
