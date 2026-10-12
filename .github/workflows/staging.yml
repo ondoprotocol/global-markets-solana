@@ -9,8 +9,6 @@ name: Verified Build — staging
 #   STAGING_RPC, STAGING_DEPLOYER_KEYPAIR, STAGING_MULTISIG, STAGING_VAULT
 
 on:
-  push:
-    branches: [staging]
   workflow_dispatch:
     inputs:
       priority_fee:

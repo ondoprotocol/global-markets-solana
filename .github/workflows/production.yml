@@ -10,8 +10,6 @@ name: Verified Build — production
 #   (PROD_PROGRAM_ADDRESS_KEYPAIR — only if you hold the vanity program-id keypair)
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
     inputs:
       priority_fee:
